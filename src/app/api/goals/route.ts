@@ -1,15 +1,18 @@
 import { NextRequest, NextResponse } from "next/server";
-import { addGoal, listGoals, updateGoal } from "@/lib/local-db";
+import { addGoal, getActiveSeason, goalsWithProgress, updateGoal } from "@/lib/local-db";
+import { apiError, goalType, metric, number, text, trackingMode } from "@/lib/validation";
 
 export const runtime = "nodejs";
 
-export async function GET() { return NextResponse.json(listGoals()); }
+export async function GET() { return NextResponse.json(goalsWithProgress()); }
 
 export async function POST(request: NextRequest) {
-  let body: { area: string; title: string; goalType: string; target: number; weight: number; deadline: string; id?: number; currentValue?: number; status?: string };
-  try { body = await request.json(); } catch { return NextResponse.json({ error: "Invalid goal payload." }, { status: 400 }); }
-  if (!body.area || !body.title) return NextResponse.json({ error: "An area and title are required." }, { status: 400 });
-  if (body.id) updateGoal(body.id, body.currentValue ?? 0, body.status ?? "active");
-  else addGoal(body.area, body.title, body.goalType, body.target, body.weight, body.deadline);
-  return NextResponse.json({ ok: true }, { status: 201 });
+  try {
+   const body = await request.json() as Record<string, unknown>;
+   if (body.id !== undefined) { const id=number(body.id,"Goal id",{positive:true}); const current=number(body.currentValue,"Current value",{min:0}); updateGoal(id,current,text(body.status??"active","Status")); return NextResponse.json({ok:true}); }
+   const mode=trackingMode(body.trackingMode??"manual"); const metricKey=metric(body.metricKey);
+   if(mode==="derived" && !metricKey) throw new Error("Derived goals need a metric key.");
+   const season=getActiveSeason(); addGoal(text(body.area,"Area"),text(body.title,"Title"),goalType(body.goalType),number(body.target,"Target",{positive:true}),number(body.weight??1,"Weight",{positive:true}),typeof body.deadline==="string"?body.deadline:season.end_date,{metricKey,trackingMode:mode,seasonId:typeof body.seasonId==="number"?body.seasonId:season.id??null});
+   return NextResponse.json({ ok: true }, { status: 201 });
+  } catch(error) { return NextResponse.json(apiError(error), {status:400}); }
 }

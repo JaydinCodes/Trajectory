@@ -1,8 +1,8 @@
-export type TrajectoryStatus = "ahead" | "on_track" | "slightly_behind" | "behind" | "completed";
-export function calculateExpectedProgress(target: number, elapsedDays: number, totalDays: number) { return target * Math.min(elapsedDays / totalDays, 1); }
-export function calculateGoalProgress(current: number, target: number) { return target <= 0 ? 0 : Math.min((current / target) * 100, 100); }
-export function calculateTrajectoryStatus(current: number, target: number, elapsedDays: number, totalDays: number): TrajectoryStatus { const p=calculateGoalProgress(current,target); const expected=(elapsedDays/totalDays)*100; if(p>=100)return "completed"; if(p>=expected+5)return "ahead"; if(p>=expected-5)return "on_track"; if(p>=expected-15)return "slightly_behind"; return "behind"; }
-export function calculateProjection(current: number, elapsedDays: number, totalDays: number) { return elapsedDays ? (current / elapsedDays) * totalDays : 0; }
+import { calculateAreaScore as scoreArea, calculateExpectedProgress, calculateGoalProgress, calculateMomentum as trajectoryMomentum, calculateProjection, calculateTrajectoryStatus as calculateTrajectoryStatusPercentage } from "./trajectory";
+export type { TrajectoryStatus } from "./trajectory/types";
+export { calculateExpectedProgress, calculateGoalProgress, calculateProjection };
+/** @deprecated Use the percentage based calculateTrajectoryStatus from lib/trajectory. */
+export function calculateTrajectoryStatus(current: number, target: number, elapsedDays: number, totalDays: number) { return calculateTrajectoryStatusPercentage(calculateGoalProgress(current, target), totalDays ? elapsedDays / totalDays * 100 : 0); }
 export function calculateStreak(days: boolean[]) { let count=0; for(const done of [...days].reverse()){if(!done) break;count++;} return count; }
-export function calculateMomentum(values:number[]): "accelerating"|"steady"|"slowing"|"stalled" { if(values.length<3)return "steady"; const split=Math.floor(values.length/2); const early=values.slice(0,split).reduce((a,b)=>a+b,0)/split; const late=values.slice(split).reduce((a,b)=>a+b,0)/(values.length-split); if(late===0)return "stalled"; if(late>early*1.15)return "accelerating"; if(late<early*.85)return "slowing"; return "steady"; }
-export function calculateAreaScore(goals:Array<{current:number;target:number;weight:number}>){const weight=goals.reduce((a,g)=>a+g.weight,0);return weight?goals.reduce((a,g)=>a+calculateGoalProgress(g.current,g.target)*g.weight,0)/weight:0;}
+export function calculateMomentum(values:number[]): "accelerating"|"steady"|"slowing"|"stalled" { const split=Math.floor(values.length/2); const result=trajectoryMomentum(values.slice(split),values.slice(0,split)); return result === "insufficient_data" ? "steady" : result; }
+export function calculateAreaScore(goals:Array<{current:number;target:number;weight:number}>){return scoreArea(goals.map(goal => ({ actualPercentage: calculateGoalProgress(goal.current, goal.target), weight: goal.weight })));}

@@ -1,6 +1,9 @@
 import "server-only";
 import fs from "node:fs";
 import path from "node:path";
+import { localDate, monthName, daysInMonth } from "@/lib/date-time";
+import { calculateAreaScore, calculateExpectedAreaScore, calculateGoalTrajectory, calculateMomentum, calculateOverallScore } from "@/lib/trajectory";
+import type { Goal, MetricKey, Season } from "@/lib/trajectory/types";
 type Statement={run:(...args:unknown[])=>unknown;get:(...args:unknown[])=>unknown;all:(...args:unknown[])=>unknown[]};
 type SqliteDatabase={exec:(sql:string)=>void;prepare:(sql:string)=>Statement};
 const nodeSqlite: { DatabaseSync: new (filename:string) => SqliteDatabase } = require("node:sqlite");
@@ -8,6 +11,11 @@ const nodeSqlite: { DatabaseSync: new (filename:string) => SqliteDatabase } = re
 const dataDir = path.join(process.cwd(), "data");
 const dbPath = path.join(dataDir, "trajectory.db");
 let database: SqliteDatabase | undefined;
+function addColumn(store: SqliteDatabase, table: string, definition: string) {
+  const column = definition.split(/\s+/)[0];
+  const columns = store.prepare(`pragma table_info(${table})`).all() as Array<{ name: string }>;
+  if (!columns.some((item) => item.name === column)) store.exec(`alter table ${table} add column ${definition}`);
+}
 function db() {
   if (database) return database;
   fs.mkdirSync(dataDir, { recursive: true });
@@ -32,7 +40,25 @@ function db() {
     create table if not exists monthly_reviews (id integer primary key, month text not null unique, lessons text, intentions text, created_at text not null default current_timestamp);
     create table if not exists season_snapshots (id integer primary key, month text not null, bible_days integer not null default 0, gym_sessions integer not null default 0, coding_problems integer not null default 0, deep_work_minutes integer not null default 0, created_at text not null default current_timestamp, unique(month));
     create table if not exists goal_evidence (id integer primary key, goal_id integer not null references goals(id) on delete cascade, kind text not null, value text not null, note text, created_at text not null default current_timestamp);
+    create table if not exists seasons (id integer primary key, name text not null, theme text not null default '', start_date text not null, end_date text not null, created_at text not null default current_timestamp, unique(start_date, end_date));
   `);
+  addColumn(database, "goals", "metric_key text");
+  addColumn(database, "goals", "tracking_mode text not null default 'manual'");
+  addColumn(database, "goals", "season_id integer");
+  addColumn(database, "entries", "area text");
+  addColumn(database, "entries", "project text");
+  addColumn(database, "entries", "metric_key text");
+  addColumn(database, "financial_entries", "area text");
+  addColumn(database, "financial_entries", "project text");
+  addColumn(database, "financial_entries", "metric_key text");
+  const malformedSeasons=database.prepare("select id,start_date from seasons where length(end_date)<>10").all() as Array<{id:number;start_date:string}>;
+  for(const season of malformedSeasons){const end=`${season.start_date.slice(0,8)}${String(daysInMonth(season.start_date)).padStart(2,"0")}`;database.prepare("update seasons set end_date=? where id=?").run(end,season.id);}
+  database.exec("update goals set deadline=(select end_date from seasons where seasons.id=goals.season_id) where length(deadline)<>10 and season_id is not null");
+  // Legacy records receive explicit metadata once; new records never infer it from free text.
+  database.exec("update entries set metric_key='dsa_problems', area='Coding' where metric_key is null and type='DSA'");
+  database.exec("update entries set metric_key='deep_work_minutes' where metric_key is null and type='Deep work'");
+  database.exec("update entries set metric_key='tutoring_revenue', project='Odysseus', area='Odysseus' where metric_key is null and type='Revenue'");
+  database.exec("update financial_entries set metric_key='tutoring_revenue', project='Odysseus', area='Odysseus' where metric_key is null and kind='income' and category='Tutoring'");
   const count = database.prepare("select count(*) as n from entries").get() as {n:number};
   if (!count.n) seed(database);
   database.prepare("insert or ignore into season_snapshots(month,bible_days,gym_sessions,coding_problems,deep_work_minutes) values(?,?,?,?,?)").run("September 2026",18,10,52,610);
@@ -48,24 +74,64 @@ function seed(store: SqliteDatabase) {
  store.prepare("insert or ignore into season_snapshots(month,bible_days,gym_sessions,coding_problems,deep_work_minutes) values(?,?,?,?,?)").run("September 2026",18,10,52,610);
 }
 export function listEntries(){ return db().prepare("select * from entries order by entry_date desc, id desc").all(); }
-export function addEntry(type:string,detail:string,amount:number|undefined,date:string){ return db().prepare("insert into entries(type,detail,amount,entry_date) values(?,?,?,?)").run(type,detail,amount ?? null,date); }
+export function addEntry(type:string,detail:string,amount:number|undefined,date:string, metadata:{area?:string;project?:string;metricKey?:MetricKey}={}){ return db().prepare("insert into entries(type,detail,amount,entry_date,area,project,metric_key) values(?,?,?,?,?,?,?)").run(type,detail,amount ?? null,date,metadata.area??null,metadata.project??null,metadata.metricKey??null); }
 export function listJournal(){return db().prepare("select * from journal order by entry_date desc, id desc").all();}
 export function addJournal(entryType:string,content:string,date:string){return db().prepare("insert into journal(entry_type,content,entry_date) values(?,?,?)").run(entryType,content,date);}
 export function updateJournal(id:number,content:string){return db().prepare("update journal set content=? where id=?").run(content,id)}
 export function removeJournal(id:number){return db().prepare("delete from journal where id=?").run(id)}
 export function addReview(week:string, accomplishment:string, slipped:string, priority:string){return db().prepare("insert into reviews(week,accomplishment,slipped,priority) values(?,?,?,?)").run(week,accomplishment,slipped,priority);}
 export function listGoals(){return db().prepare("select * from goals order by weight desc").all();}
-export function addGoal(area:string,title:string,goalType:string,target:number,weight:number,deadline:string){return db().prepare("insert into goals(area,title,goal_type,target,weight,deadline) values(?,?,?,?,?,?)").run(area,title,goalType,target,weight,deadline);}
+export function addGoal(area:string,title:string,goalType:string,target:number,weight:number,deadline:string, options:{metricKey?:MetricKey|null;trackingMode?:"derived"|"manual";seasonId?:number|null}={}){return db().prepare("insert into goals(area,title,goal_type,target,weight,deadline,metric_key,tracking_mode,season_id) values(?,?,?,?,?,?,?,?,?)").run(area,title,goalType,target,weight,deadline,options.metricKey??null,options.trackingMode??"manual",options.seasonId??null);}
 export function updateGoal(id:number,currentValue:number,status:string){return db().prepare("update goals set current_value=?, status=? where id=?").run(currentValue,status,id);}
 export function listFinance(){return db().prepare("select * from financial_entries order by entry_date desc,id desc").all();}
-export function addFinance(kind:string,category:string,amount:number,date:string,note:string){return db().prepare("insert into financial_entries(kind,category,amount,entry_date,note) values(?,?,?,?,?)").run(kind,category,amount,date,note);}
+export function addFinance(kind:string,category:string,amount:number,date:string,note:string, metadata:{area?:string;project?:string;metricKey?:MetricKey}={}){return db().prepare("insert into financial_entries(kind,category,amount,entry_date,note,area,project,metric_key) values(?,?,?,?,?,?,?,?)").run(kind,category,amount,date,note,metadata.area??null,metadata.project??null,metadata.metricKey??null);}
 export function removeFinance(id:number){return db().prepare("delete from financial_entries where id=?").run(id);}
 export function listBudgets(){return db().prepare("select * from budgets order by category").all()}
 export function saveBudget(category:string,target:number){return db().prepare("insert into budgets(category,monthly_target,updated_at) values(?,?,current_timestamp) on conflict(category) do update set monthly_target=excluded.monthly_target,updated_at=current_timestamp").run(category,target)}
-export function addRecord(kind:string, values:Record<string,unknown>){const store=db();const date=String(values.date ?? new Date().toISOString().slice(0,10));if(kind==="bible")return store.prepare("insert into bible_entries(book,chapters,minutes,entry_date,note) values(?,?,?,?,?)").run(values.book,values.chapters,values.minutes,date,values.note);if(kind==="workout"){store.prepare("insert into workouts(workout_type,duration,body_weight,notes,entry_date) values(?,?,?,?,?)").run(values.workoutType,values.duration,values.bodyWeight,values.notes,date);const id=(store.prepare("select last_insert_rowid() as id").get() as {id:number}).id;const exercises=Array.isArray(values.exercises)?values.exercises:[];for(const item of exercises){if(item&&typeof item==="object"){const x=item as Record<string,unknown>;if(x.exercise)store.prepare("insert into workout_exercises(workout_id,exercise,sets,reps,weight,rpe) values(?,?,?,?,?,?)").run(id,x.exercise,x.sets,x.reps,x.weight,x.rpe)}}return id}if(kind==="coding")return store.prepare("insert into coding_entries(problems,category,platform,entry_date,note) values(?,?,?,?,?)").run(values.problems,values.category,values.platform,date,values.note);if(kind==="pulse")return store.prepare("insert into daily_pulse(entry_date,mood,energy,stress,updated_at) values(?,?,?,?,current_timestamp) on conflict(entry_date) do update set mood=excluded.mood,energy=excluded.energy,stress=excluded.stress,updated_at=current_timestamp").run(date,values.mood,values.energy,values.stress);throw new Error("Unsupported record type");}
+export function addRecord(kind:string, values:Record<string,unknown>){const store=db();const date=String(values.date ?? localDate());if(kind==="bible")return store.prepare("insert into bible_entries(book,chapters,minutes,entry_date,note) values(?,?,?,?,?)").run(values.book,values.chapters??null,values.minutes??null,date,values.note??null);if(kind==="workout"){store.prepare("insert into workouts(workout_type,duration,body_weight,notes,entry_date) values(?,?,?,?,?)").run(values.workoutType,values.duration,values.bodyWeight??null,values.notes??null,date);const id=(store.prepare("select last_insert_rowid() as id").get() as {id:number}).id;const exercises=Array.isArray(values.exercises)?values.exercises:[];for(const item of exercises){if(item&&typeof item==="object"){const x=item as Record<string,unknown>;if(x.exercise)store.prepare("insert into workout_exercises(workout_id,exercise,sets,reps,weight,rpe) values(?,?,?,?,?,?)").run(id,x.exercise,x.sets??null,x.reps??null,x.weight??null,x.rpe??null)}}return id}if(kind==="coding")return store.prepare("insert into coding_entries(problems,category,platform,entry_date,note) values(?,?,?,?,?)").run(values.problems,values.category,values.platform??null,date,values.note??null);if(kind==="pulse")return store.prepare("insert into daily_pulse(entry_date,mood,energy,stress,updated_at) values(?,?,?,?,current_timestamp) on conflict(entry_date) do update set mood=excluded.mood,energy=excluded.energy,stress=excluded.stress,updated_at=current_timestamp").run(date,values.mood,values.energy,values.stress);throw new Error("Unsupported record type");}
 export function listRecords(kind:string){const tables:Record<string,string>={bible:"bible_entries",workout:"workouts",coding:"coding_entries",pulse:"daily_pulse"};const table=tables[kind];if(!table)throw new Error("Unsupported record type");return db().prepare(`select * from ${table} order by entry_date desc,id desc`).all();}
 export function removeRecord(kind:string,id:number){const tables:Record<string,string>={bible:"bible_entries",workout:"workouts",coding:"coding_entries"};const table=tables[kind];if(!table)throw new Error("Unsupported record type");return db().prepare(`delete from ${table} where id=?`).run(id);}
-export function insights(){const store=db();const byType=store.prepare("select type, count(*) as count, coalesce(sum(amount),0) as total from entries group by type").all() as Array<{type:string;count:number;total:number}>;const bible=store.prepare("select count(*) as n from bible_entries").get() as {n:number};const workouts=store.prepare("select count(*) as n from workouts").get() as {n:number};const code=store.prepare("select coalesce(sum(problems),0) as n from coding_entries").get() as {n:number};const deep=store.prepare("select coalesce(sum(amount),0) as n from entries where type='Deep work'").get() as {n:number};return {byType,bibleDays:bible.n,gymSessions:workouts.n,codingProblems:code.n,deepWorkMinutes:deep.n};}
+export function getActiveSeason(today = localDate()): Season {
+ const store=db(); const existing=store.prepare("select * from seasons where start_date<=? and end_date>=? order by start_date desc limit 1").get(today,today) as Season|undefined;
+ if(existing) return existing;
+ const start=`${today.slice(0,7)}-01`; const end=`${today.slice(0,8)}${String(daysInMonth(today)).padStart(2,"0")}`;
+ store.prepare("insert or ignore into seasons(name,theme,start_date,end_date) values(?,?,?,?)").run(monthName(today),"Consistency + Execution",start,end);
+ return store.prepare("select * from seasons where start_date=? and end_date=?").get(start,end) as Season;
+}
+export function listSeasons(){ return db().prepare("select * from seasons order by start_date desc").all(); }
+export function createSeason(name:string,theme:string,startDate:string,endDate:string){ return db().prepare("insert into seasons(name,theme,start_date,end_date) values(?,?,?,?)").run(name,theme,startDate,endDate); }
+export function metricTotals(season:Season): Record<MetricKey,number> {
+ const store=db(); const range=[season.start_date,season.end_date];
+ const one=(sql:string,...params:unknown[])=>Number((store.prepare(sql).get(...params) as {value:number}|undefined)?.value??0);
+ return {
+  bible_days: one("select count(distinct entry_date) as value from bible_entries where entry_date between ? and ?",...range),
+  gym_sessions: one("select count(*) as value from workouts where entry_date between ? and ?",...range),
+  dsa_problems: one("select coalesce(sum(problems),0) as value from coding_entries where entry_date between ? and ?",...range) + one("select coalesce(sum(amount),0) as value from entries where metric_key='dsa_problems' and entry_date between ? and ?",...range),
+  deep_work_minutes: one("select coalesce(sum(amount),0) as value from entries where metric_key='deep_work_minutes' and entry_date between ? and ?",...range),
+  tutoring_revenue: one("select coalesce(sum(amount),0) as value from financial_entries where metric_key='tutoring_revenue' and entry_date between ? and ?",...range) + one("select coalesce(sum(amount),0) as value from entries where metric_key='tutoring_revenue' and entry_date between ? and ?",...range),
+  savings: one("select coalesce(sum(amount),0) as value from financial_entries where metric_key='savings' and entry_date between ? and ?",...range), custom: 0,
+ };
+}
+export function goalsWithProgress(today=localDate()) {
+ const season=getActiveSeason(today); const metrics=metricTotals(season);
+ return (listGoals() as Goal[]).map((goal)=>calculateGoalTrajectory(goal, goal.season_id === season.id || !goal.season_id ? season : season, today, goal.metric_key ? metrics[goal.metric_key] : undefined));
+}
+function metricDaily(metric:MetricKey,start:string,end:string):number[] {
+ const store=db(); let rows:Array<{entry_date:string;value:number}>=[];
+ if(metric==="bible_days") rows=store.prepare("select entry_date,1 as value from bible_entries where entry_date between ? and ? group by entry_date").all(start,end) as typeof rows;
+ if(metric==="gym_sessions") rows=store.prepare("select entry_date,1 as value from workouts where entry_date between ? and ?").all(start,end) as typeof rows;
+ if(metric==="dsa_problems") rows=store.prepare("select entry_date,coalesce(sum(problems),0) as value from coding_entries where entry_date between ? and ? group by entry_date").all(start,end) as typeof rows;
+ if(metric==="deep_work_minutes") rows=store.prepare("select entry_date,coalesce(sum(amount),0) as value from entries where metric_key='deep_work_minutes' and entry_date between ? and ? group by entry_date").all(start,end) as typeof rows;
+ if(metric==="tutoring_revenue") rows=store.prepare("select entry_date,coalesce(sum(amount),0) as value from financial_entries where metric_key='tutoring_revenue' and entry_date between ? and ? group by entry_date").all(start,end) as typeof rows;
+ return rows.map(row=>Number(row.value));
+}
+export function areaMomentum(area:string,today=localDate()) {
+ const end=new Date(`${today}T00:00:00Z`); const date=(offset:number)=>{const value=new Date(end);value.setUTCDate(value.getUTCDate()+offset);return `${value.getUTCFullYear()}-${String(value.getUTCMonth()+1).padStart(2,"0")}-${String(value.getUTCDate()).padStart(2,"0")}`};
+ const goals=(goalsWithProgress(today)).filter(goal=>goal.area===area && goal.metric_key);
+ const current=goals.flatMap(goal=>metricDaily(goal.metric_key!,date(-6),today)); const previous=goals.flatMap(goal=>metricDaily(goal.metric_key!,date(-13),date(-7)));
+ return calculateMomentum(current,previous);
+}
+export function insights(today=localDate()){const store=db();const byType=store.prepare("select type, count(*) as count, coalesce(sum(amount),0) as total from entries group by type").all() as Array<{type:string;count:number;total:number}>;const metrics=metricTotals(getActiveSeason(today));return {byType,bibleDays:metrics.bible_days,gymSessions:metrics.gym_sessions,codingProblems:metrics.dsa_problems,deepWorkMinutes:metrics.deep_work_minutes,tutoringRevenue:metrics.tutoring_revenue};}
 export function listMilestones(){return db().prepare("select * from milestones order by achieved_at desc,id desc").all();}
 export function addMilestone(area:string,title:string,date:string,note:string){return db().prepare("insert into milestones(area,title,achieved_at,note) values(?,?,?,?)").run(area,title,date,note);}
 export function removeMilestone(id:number){return db().prepare("delete from milestones where id=?").run(id)}
@@ -81,9 +147,27 @@ export function activityDays(){return db().prepare("select entry_date as date,co
 export function activityDaysFor(metric:string){const sql:Record<string,string>={Bible:"select entry_date as date,count(*) as count from bible_entries group by entry_date",Gym:"select entry_date as date,count(*) as count from workouts group by entry_date",Coding:"select entry_date as date,sum(problems) as count from coding_entries group by entry_date",Journal:"select entry_date as date,count(*) as count from journal group by entry_date",Overall:"select entry_date as date,count(*) as count from (select entry_date from entries union all select entry_date from bible_entries union all select entry_date from workouts union all select entry_date from coding_entries union all select entry_date from journal) group by entry_date"};return db().prepare(sql[metric]??sql.Overall).all();}
 export function addEvidence(goalId:number,kind:string,value:string,note:string){return db().prepare("insert into goal_evidence(goal_id,kind,value,note) values(?,?,?,?)").run(goalId,kind,value,note)}
 export function listEvidence(goalId:number){return db().prepare("select * from goal_evidence where goal_id=? order by id desc").all(goalId)}
+export function goalEvidence(goalId:number) {
+ const store=db(); const goal=goalsWithProgress().find(item=>item.id===goalId); if(!goal) return [];
+ const manual=(listEvidence(goalId) as Array<Record<string,unknown>>).map(item=>({...item,source:"manual"})); if(goal.tracking_mode!=="derived" || !goal.metric_key) return manual;
+ let derived:Array<Record<string,unknown>>=[];
+ if(goal.metric_key==="bible_days") derived=store.prepare("select id, entry_date as date, 'activity' as kind, coalesce(book,'Scripture') as value, note from bible_entries order by entry_date desc,id desc").all() as typeof derived;
+ if(goal.metric_key==="gym_sessions") derived=store.prepare("select id, entry_date as date, 'activity' as kind, workout_type as value, notes as note from workouts order by entry_date desc,id desc").all() as typeof derived;
+ if(goal.metric_key==="dsa_problems") derived=store.prepare("select id, entry_date as date, 'measurement' as kind, problems || ' problems' as value, trim(coalesce(category,'') || ' ' || coalesce(platform,'')) as note from coding_entries order by entry_date desc,id desc").all() as typeof derived;
+ if(goal.metric_key==="deep_work_minutes") derived=store.prepare("select id, entry_date as date, 'activity' as kind, amount || ' minutes' as value, detail as note from entries where metric_key='deep_work_minutes' order by entry_date desc,id desc").all() as typeof derived;
+ if(goal.metric_key==="tutoring_revenue") derived=store.prepare("select id, entry_date as date, 'measurement' as kind, 'R' || amount as value, trim(coalesce(project,'') || ' ' || coalesce(note,'')) as note from financial_entries where metric_key='tutoring_revenue' order by entry_date desc,id desc").all() as typeof derived;
+ return [...derived.map(item=>({...item,source:"derived"})),...manual];
+}
 export function exportData(){const store=db();const tables=["entries","journal","reviews","goals","goal_evidence","financial_entries","milestones","bible_entries","workouts","workout_exercises","coding_entries","daily_pulse","settings"];return Object.fromEntries(tables.map(table=>[table,store.prepare(`select * from ${table}`).all()]));}
 export function reviewSummary(){const d=insights();const priority=d.deepWorkMinutes<480?"Schedule one protected Ledgerly block before the week fills up.":"Protect the routines that are already generating evidence.";return {summary:`This week contains ${d.bibleDays} Scripture records, ${d.gymSessions} training sessions, and ${d.codingProblems} coding problems.`,priority};}
 export function correlations(){const store=db();const trained=store.prepare("select avg(p.mood) as average from daily_pulse p where exists(select 1 from workouts w where w.entry_date=p.entry_date)").get() as {average:number|null};const rest=store.prepare("select avg(p.mood) as average from daily_pulse p where not exists(select 1 from workouts w where w.entry_date=p.entry_date)").get() as {average:number|null};return {gymMood:trained.average===null||rest.average===null?null:{trained:Math.round(trained.average*10)/10,rest:Math.round(rest.average*10)/10}}}
-export function comparison(){const previous=db().prepare("select * from season_snapshots order by id desc limit 1").get() as Record<string,unknown>|undefined;const current=insights();return {previous,current:{month:"October 2026",bible_days:current.bibleDays,gym_sessions:current.gymSessions,coding_problems:current.codingProblems,deep_work_minutes:current.deepWorkMinutes}}}
+export function comparison(){const previous=db().prepare("select * from season_snapshots order by id desc limit 1").get() as Record<string,unknown>|undefined;const current=insights();return {previous,current:{month:monthName(),bible_days:current.bibleDays,gym_sessions:current.gymSessions,coding_problems:current.codingProblems,deep_work_minutes:current.deepWorkMinutes}}}
 export function saveSnapshot(month:string){const d=insights();return db().prepare("insert into season_snapshots(month,bible_days,gym_sessions,coding_problems,deep_work_minutes) values(?,?,?,?,?) on conflict(month) do update set bible_days=excluded.bible_days,gym_sessions=excluded.gym_sessions,coding_problems=excluded.coding_problems,deep_work_minutes=excluded.deep_work_minutes").run(month,d.bibleDays,d.gymSessions,d.codingProblems,d.deepWorkMinutes)}
-export function dashboard(){const allGoals=listGoals() as Array<{current_value:number;target:number;weight:number;area:string}>;const weight=allGoals.reduce((n,g)=>n+Number(g.weight),0)||1;const score=Math.round(allGoals.reduce((n,g)=>n+Math.min(100,Number(g.current_value)/Number(g.target)*100)*Number(g.weight),0)/weight);const byArea=Object.entries(allGoals.reduce<Record<string,{current:number;target:number}>>((a,g)=>{const item=a[g.area]??{current:0,target:0};item.current+=Number(g.current_value);item.target+=Number(g.target);a[g.area]=item;return a},{})).map(([area,v])=>({area,score:Math.round(v.current/v.target*100)}));return {score,areas:byArea,...insights()}}
+export function dashboard(today=localDate()){
+ const season=getActiveSeason(today); const goals=goalsWithProgress(today);
+ const areaGroups=Object.entries(goals.reduce<Record<string,typeof goals>>((all,goal)=>{(all[goal.area]??=[]).push(goal);return all;},{}));
+ const areas=areaGroups.map(([area,items])=>{const score=calculateAreaScore(items);const expected=calculateExpectedAreaScore(items);return {area,score:Math.round(score),expected:Math.round(expected),delta:Math.round(score-expected),momentum:areaMomentum(area,today),weight:items.reduce((sum,item)=>sum+Number(item.weight),0)};});
+ const score=calculateOverallScore(areas); const expected=calculateOverallScore(areas.map(area=>({...area,score:area.expected})));
+ const totalWeight=goals.reduce((sum,goal)=>sum+Number(goal.weight),0); const projected=totalWeight ? goals.reduce((sum,goal)=>sum+goal.projectedPercentage*Number(goal.weight),0)/totalWeight : 0;
+ return {score:Math.round(score),expected:Math.round(expected),delta:Math.round(score-expected),projected:Math.round(Math.min(projected,100)),season,goals,areas,...insights(today)};
+}
