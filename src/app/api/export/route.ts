@@ -1,0 +1,1 @@
+import { NextResponse } from "next/server";import { exportData } from "@/lib/local-db";export const runtime="nodejs";export async function GET(){return new NextResponse(JSON.stringify(exportData(),null,2),{headers:{"content-type":"application/json","content-disposition":"attachment; filename=trajectory-backup.json"}})}

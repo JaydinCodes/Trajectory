@@ -1,0 +1,1 @@
+import { NextRequest,NextResponse } from "next/server";import { activityDays,activityDaysFor } from "@/lib/local-db";export const runtime="nodejs";export async function GET(r:NextRequest){const metric=r.nextUrl.searchParams.get("metric");return NextResponse.json(metric?activityDaysFor(metric):activityDays())}

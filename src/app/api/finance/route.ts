@@ -1,0 +1,3 @@
+import { NextRequest, NextResponse } from "next/server";import { addFinance,listFinance,removeFinance } from "@/lib/local-db";export const runtime="nodejs";
+export async function GET(){return NextResponse.json(listFinance())}export async function POST(r:NextRequest){const b=await r.json() as {kind:string;category:string;amount:number;date:string;note:string};addFinance(b.kind,b.category,b.amount,b.date,b.note);return NextResponse.json({ok:true},{status:201})}
+export async function DELETE(r:NextRequest){const id=Number(r.nextUrl.searchParams.get("id"));if(!Number.isInteger(id))return NextResponse.json({error:"Invalid entry."},{status:400});removeFinance(id);return NextResponse.json({ok:true})}

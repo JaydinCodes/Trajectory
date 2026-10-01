@@ -1,0 +1,1 @@
+import { NextRequest,NextResponse } from "next/server";import { searchEverything } from "@/lib/local-db";export const runtime="nodejs";export async function GET(r:NextRequest){return NextResponse.json(searchEverything(r.nextUrl.searchParams.get("q")??""))}

@@ -1,0 +1,1 @@
+import { NextRequest,NextResponse } from "next/server";import { readSettings,saveSetting } from "@/lib/local-db";export const runtime="nodejs";export async function GET(){return NextResponse.json(readSettings())}export async function POST(r:NextRequest){const b=await r.json() as {key:string;value:string};saveSetting(b.key,b.value);return NextResponse.json({ok:true})}
