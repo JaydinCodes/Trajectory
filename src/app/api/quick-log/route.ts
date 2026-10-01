@@ -3,8 +3,8 @@ import { addEntry, addFinance, addJournal, addMilestone, addRecord } from "@/lib
 import { apiError, date, number, text } from "@/lib/validation";
 
 export const runtime = "nodejs";
-type QuickKind = "Scripture" | "Workout" | "Deep Work" | "DSA" | "Revenue" | "Finance" | "Journal" | "Milestone" | "Mood";
-const kinds: QuickKind[] = ["Scripture", "Workout", "Deep Work", "DSA", "Revenue", "Finance", "Journal", "Milestone", "Mood"];
+type QuickKind = "Scripture" | "Workout" | "Deep Work" | "DSA" | "Tutoring Revenue" | "Finance" | "Journal" | "Milestone" | "Mood";
+const kinds: QuickKind[] = ["Scripture", "Workout", "Deep Work", "DSA", "Tutoring Revenue", "Finance", "Journal", "Milestone", "Mood"];
 
 export async function POST(request: NextRequest) {
   try {
@@ -19,7 +19,7 @@ export async function POST(request: NextRequest) {
     if (kind === "Workout") addRecord("workout", { workoutType: detail, duration: quantity(), date: entryDate, exercises: [] });
     if (kind === "DSA") addRecord("coding", { problems: quantity(), category: detail, date: entryDate });
     if (kind === "Deep Work") addEntry("Deep work", detail, quantity(), entryDate, { area: text(body.area ?? "Career", "Area"), project: project || undefined, metricKey: "deep_work_minutes" });
-    if (kind === "Revenue") addFinance("income", detail, quantity(), entryDate, "", { area: "Odysseus", project: project || "Odysseus", metricKey: "tutoring_revenue" });
+    if (kind === "Tutoring Revenue") addFinance("income", detail, quantity(), entryDate, "", { area: "Odysseus", project: project || "Odysseus", metricKey: "tutoring_revenue" });
     if (kind === "Finance") addFinance("expense", detail, quantity(), entryDate, "", { area: text(body.area ?? "Finance", "Area") });
     if (kind === "Journal") addJournal("reflection", detail, entryDate);
     if (kind === "Milestone") addMilestone(text(body.area ?? "Personal", "Area"), detail, entryDate, "");

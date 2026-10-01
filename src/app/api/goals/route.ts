@@ -1,10 +1,10 @@
 import { NextRequest, NextResponse } from "next/server";
 import { addGoal, getActiveSeason, goalsWithProgress, updateGoal } from "@/lib/local-db";
-import { apiError, goalType, metric, number, text, trackingMode } from "@/lib/validation";
+import { apiError, date, goalType, metric, number, text, trackingMode } from "@/lib/validation";
 
 export const runtime = "nodejs";
 
-export async function GET() { return NextResponse.json(goalsWithProgress()); }
+export async function GET(request: NextRequest) { try { const asOfDate=request.nextUrl.searchParams.get("asOfDate"); return NextResponse.json(goalsWithProgress(asOfDate?date(asOfDate):undefined)); } catch(error) { return NextResponse.json(apiError(error), {status:400}); } }
 
 export async function POST(request: NextRequest) {
   try {
