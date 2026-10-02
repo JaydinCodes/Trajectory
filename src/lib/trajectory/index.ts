@@ -2,7 +2,7 @@ import { daysBetweenInclusive, isDateOnly } from "../date-time";
 import type { Goal, GoalProgress, Momentum, Season, TrajectoryStatus } from "./types";
 
 const finitePositive = (value: number) => Number.isFinite(value) && value > 0 ? value : 0;
-export function calculateGoalProgress(current: number, target: number): number { return finitePositive(target) === 0 ? 0 : Math.max(0, Math.min((Math.max(0, current) / target) * 100, 100)); }
+export function calculateGoalProgress(current: number, target: number, baseline = 0): number { const distance = target - baseline; return finitePositive(distance) === 0 ? 0 : Math.max(0, Math.min(((Math.max(baseline, current) - baseline) / distance) * 100, 100)); }
 export function calculateExpectedProgress(target: number, elapsedDays: number, totalDays: number): number { return finitePositive(target) * Math.max(0, Math.min(elapsedDays / finitePositive(totalDays), 1)); }
 export function calculateExpectedPercentage(elapsedDays: number, totalDays: number): number { return finitePositive(totalDays) === 0 ? 0 : Math.max(0, Math.min((elapsedDays / totalDays) * 100, 100)); }
 export function calculateTrajectoryStatus(actualPercentage: number, expectedPercentage: number): TrajectoryStatus {
@@ -22,12 +22,13 @@ export function calculateSeasonProgress(season: Season, today: string): { elapse
 }
 export function calculateGoalTrajectory(goal: Goal, season: Season, today: string, derivedValue?: number): GoalProgress {
   const current = goal.tracking_mode === "derived" && goal.metric_key ? Math.max(0, derivedValue ?? 0) : Math.max(0, Number(goal.current_value));
+  const baseline = goal.tracking_mode === "manual" ? Math.max(0, Number(goal.baseline_value ?? 0)) : 0;
   const { elapsedDays, totalDays } = calculateSeasonProgress(season, today);
-  const actualPercentage = calculateGoalProgress(current, Number(goal.target));
-  const expectedValue = calculateExpectedProgress(Number(goal.target), elapsedDays, totalDays);
+  const actualPercentage = calculateGoalProgress(current, Number(goal.target), baseline);
+  const expectedValue = baseline + calculateExpectedProgress(Number(goal.target) - baseline, elapsedDays, totalDays);
   const expectedPercentage = calculateExpectedPercentage(elapsedDays, totalDays);
-  const projectedValue = calculateProjection(current, elapsedDays, totalDays);
-  return { ...goal, current, actualPercentage, expectedPercentage, expectedValue, deltaPercentage: actualPercentage - expectedPercentage, projectedValue, projectedPercentage: calculateGoalProgress(projectedValue, Number(goal.target)), trajectoryStatus: calculateTrajectoryStatus(actualPercentage, expectedPercentage) };
+  const projectedValue = baseline + calculateProjection(Math.max(0, current - baseline), elapsedDays, totalDays);
+  return { ...goal, current, actualPercentage, expectedPercentage, expectedValue, deltaPercentage: actualPercentage - expectedPercentage, projectedValue, projectedPercentage: calculateGoalProgress(projectedValue, Number(goal.target), baseline), trajectoryStatus: calculateTrajectoryStatus(actualPercentage, expectedPercentage) };
 }
 export function calculateAreaScore(goals: Array<Pick<GoalProgress, "actualPercentage" | "weight">>) { const weights = goals.reduce((total, goal) => total + finitePositive(goal.weight), 0); return weights === 0 ? 0 : goals.reduce((total, goal) => total + goal.actualPercentage * finitePositive(goal.weight), 0) / weights; }
 export function calculateExpectedAreaScore(goals: Array<Pick<GoalProgress, "expectedPercentage" | "weight">>) { const weights = goals.reduce((total, goal) => total + finitePositive(goal.weight), 0); return weights === 0 ? 0 : goals.reduce((total, goal) => total + goal.expectedPercentage * finitePositive(goal.weight), 0) / weights; }

@@ -73,3 +73,34 @@ test("season review derives dated evidence and persists a completed reflection",
   await page.reload();
   await expect(page.getByLabel(/what am i proud/i)).toHaveValue("I kept a dated record.");
 });
+
+test("plans, carries forward, and activates a new evidence-driven season", async ({ page }) => {
+  const suffix = Date.now();
+  const year = 2100 + (suffix % 100);
+  const previousName = `Planning source ${suffix}`;
+  await page.request.post("/api/seasons", { data: { name: previousName, theme: "Finish", startDate: `${year}-10-01`, endDate: `${year}-10-31` } });
+  const seasons = await (await page.request.get("/api/seasons")).json() as { seasons: Array<{ id: number; name: string }> };
+  const previous = seasons.seasons.find((season) => season.name === previousName);
+  expect(previous).toBeDefined();
+  await page.request.post("/api/goals", { data: { area: "Ledgerly", title: `MVP ${suffix}`, target: 100, goalType: "numeric", weight: 1, trackingMode: "manual", seasonId: previous?.id, deadline: `${year}-10-31` } });
+  await page.request.put("/api/reviews/season", { data: { seasonId: previous?.id, proudOf: "Kept the record.", changedMost: "Focus.", obstacles: "Fragmentation.", lesson: "Consistency wins.", carryForward: "Protect deep work.", leaveBehind: "Equal project effort.", complete: true } });
+  await page.goto(`/plan/season?previousSeasonId=${previous?.id}`);
+  await expect(page.getByRole("heading", { name: /Plan the next/i })).toBeVisible();
+  await page.getByLabel("Theme").fill("Build + Stabilise");
+  await page.getByLabel("Start").fill(`${year}-11-01`);
+  await page.getByLabel("End").fill(`${year}-11-30`);
+  await page.getByRole("button", { name: "Coding" }).click();
+  await page.getByRole("button", { name: /Add a goal/i }).click();
+  const cards = page.locator(".goal-card");
+  await cards.nth(0).getByLabel("Goal").fill(`DSA ${suffix}`);
+  await cards.nth(0).getByLabel("Area").selectOption("Coding");
+  await cards.nth(0).getByLabel("Tracking").selectOption("derived");
+  await cards.nth(0).getByLabel("Metric").selectOption("dsa_problems");
+  await cards.nth(0).getByLabel("Target").fill("100");
+  await page.getByRole("button", { name: /Carry forward/i }).click();
+  await page.getByRole("button", { name: "Start Season" }).click();
+  await expect(page).toHaveURL(/trajectory/);
+  const dashboard = await (await page.request.get(`/api/dashboard?asOfDate=${year}-11-01`)).json() as { season: { theme: string }; goals: Array<{ title: string }> };
+  expect(dashboard.season.theme).toBe("Build + Stabilise");
+  expect(dashboard.goals).toContainEqual(expect.objectContaining({ title: `DSA ${suffix}` }));
+});

@@ -2,13 +2,13 @@
 
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import { BookOpen, BriefcaseBusiness, ChartNoAxesCombined, CircleUserRound, Home, Lightbulb, Search, Settings, Sparkles } from "lucide-react";
+import { BookOpen, BriefcaseBusiness, ChartNoAxesCombined, CircleUserRound, Home, Lightbulb, Map, Search, Settings, Sparkles } from "lucide-react";
 
 const nav = [
   { href: "/", icon: Home, label: "Today" }, { href: "/trajectory", icon: ChartNoAxesCombined, label: "Trajectory" },
   { href: "/areas", icon: Sparkles, label: "Areas" }, { href: "/journal", icon: BookOpen, label: "Journal" },
   { href: "/insights", icon: Lightbulb, label: "Insights" }, { href: "/review", icon: BriefcaseBusiness, label: "Review" },
-  { href: "/review/season", icon: ChartNoAxesCombined, label: "Season Review" },
+  { href: "/review/season", icon: ChartNoAxesCombined, label: "Season Review" }, { href: "/plan/season", icon: Map, label: "Plan season" },
 ];
 
 export function AppChrome({ children }: { children: React.ReactNode }) {

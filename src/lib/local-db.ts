@@ -14,6 +14,9 @@ import type { EvidenceSummary, WeeklyReflection } from "@/domain/review/types";
 import { calculateSeasonReview } from "@/services/season-review-service";
 import type { SeasonReflection, SeasonReview, WeeklyReviewSummary } from "@/domain/season-review/types";
 import { getSeasonWeekRanges } from "@/domain/season-review/season-period";
+import { activateDraftSeason, createDraftSeason, updateDraftSeason } from "@/services/season-planning-service";
+import { nextCalendarMonth } from "@/domain/season-planning/planning";
+import type { SeasonPlanInput, UnfinishedGoal } from "@/domain/season-planning/types";
 const nodeSqlite: { DatabaseSync: new (filename:string) => SqliteDatabase } = require("node:sqlite");
 
 const dataDir = path.join(process.cwd(), "data");
@@ -52,11 +55,20 @@ function db() {
     create table if not exists goal_updates (id integer primary key, goal_id integer not null references goals(id) on delete cascade, value real not null, status text not null default 'active', effective_date text not null, note text, created_at text not null default current_timestamp);
     create table if not exists weekly_reviews (id integer primary key, season_id integer not null references seasons(id) on delete cascade, week_start text not null, week_end text not null, proud_of text not null default '', got_in_way text not null default '', lesson text not null default '', next_primary_focus text not null default '', next_secondary_focus text not null default '', completed_at text, created_at text not null default current_timestamp, updated_at text not null default current_timestamp, unique(season_id, week_start));
     create table if not exists season_reviews (id integer primary key, season_id integer not null references seasons(id) on delete cascade, proud_of text not null default '', changed_most text not null default '', obstacles text not null default '', lesson text not null default '', carry_forward text not null default '', leave_behind text not null default '', completed_at text, created_at text not null default current_timestamp, updated_at text not null default current_timestamp, unique(season_id));
+    create table if not exists season_area_plans (id integer primary key, season_id integer not null references seasons(id) on delete cascade, area text not null, outcome text not null default '', priority real not null default 1, created_at text not null default current_timestamp, unique(season_id,area));
+    create table if not exists season_planning_lessons (id integer primary key, season_id integer not null references seasons(id) on delete cascade, kind text not null check(kind in ('carry_forward','leave_behind','lesson')), content text not null, created_at text not null default current_timestamp);
   `);
   addColumn(database, "goals", "metric_key text");
   addColumn(database, "goals", "tracking_mode text not null default 'manual'");
   addColumn(database, "goals", "season_id integer");
   addColumn(database, "goals", "baseline_value real not null default 0");
+  addColumn(database, "goals", "carried_from_goal_id integer");
+  addColumn(database, "seasons", "status text not null default 'draft'");
+  addColumn(database, "seasons", "updated_at text");
+  addColumn(database, "seasons", "intention text");
+  addColumn(database, "seasons", "activated_at text");
+  addColumn(database, "seasons", "completed_at text");
+  addColumn(database, "seasons", "previous_season_id integer");
   addColumn(database, "entries", "area text");
   addColumn(database, "entries", "project text");
   addColumn(database, "entries", "metric_key text");
@@ -71,6 +83,15 @@ function db() {
   database.exec("create index if not exists goal_updates_goal_date_idx on goal_updates(goal_id,effective_date desc,id desc)");
   database.exec("create index if not exists weekly_reviews_season_week_idx on weekly_reviews(season_id,week_start)");
   database.exec("create index if not exists season_reviews_season_idx on season_reviews(season_id)");
+  database.exec("create index if not exists seasons_status_range_idx on seasons(status,start_date,end_date)");
+  database.exec("create index if not exists goals_carried_from_idx on goals(carried_from_goal_id)");
+  // Data created before lifecycle support was implicitly current when its dates contained today.
+  // Record completion so a newly saved current-date draft is never auto-activated on restart.
+  const lifecycleBackfill = database.prepare("select value from settings where key='season_lifecycle_backfill_v1'").get();
+  if (!lifecycleBackfill) {
+    database.prepare("update seasons set status='active',activated_at=coalesce(activated_at,current_timestamp) where status='draft' and start_date<=? and end_date>=?").run(localDate(),localDate());
+    database.prepare("insert into settings(key,value) values('season_lifecycle_backfill_v1','complete')").run();
+  }
   // Legacy records receive explicit metadata once; new records never infer it from free text.
   database.exec("update entries set metric_key='dsa_problems', area='Coding' where metric_key is null and type='DSA'");
   database.exec("update entries set metric_key='deep_work_minutes' where metric_key is null and type='Deep work'");
@@ -117,16 +138,39 @@ export function addRecord(kind:string, values:Record<string,unknown>){const stor
 export function listRecords(kind:string){const tables:Record<string,string>={bible:"bible_entries",workout:"workouts",coding:"coding_entries",pulse:"daily_pulse"};const table=tables[kind];if(!table)throw new Error("Unsupported record type");return db().prepare(`select * from ${table} order by entry_date desc,id desc`).all();}
 export function removeRecord(kind:string,id:number){const tables:Record<string,string>={bible:"bible_entries",workout:"workouts",coding:"coding_entries"};const table=tables[kind];if(!table)throw new Error("Unsupported record type");return db().prepare(`delete from ${table} where id=?`).run(id);}
 export function getActiveSeason(today = localDate()): Season {
- const store=db(); const existing=store.prepare("select * from seasons where start_date<=? and end_date>=? order by start_date desc limit 1").get(today,today) as Season|undefined;
+ const store=db(); const existing=store.prepare("select * from seasons where status in ('active','completed') and start_date<=? and end_date>=? order by case status when 'active' then 0 else 1 end, start_date desc limit 1").get(today,today) as Season|undefined;
  if(existing){store.prepare("update goals set season_id=? where season_id is null and deadline between ? and ?").run(existing.id,existing.start_date,existing.end_date);return existing;}
+ const seasonCount = store.prepare("select count(*) as count from seasons").get() as { count: number };
+ if (seasonCount.count) throw new Error("There is no active season for this date. Plan and start a season first.");
+ // The local demo seeds evidence before its first season exists. This one-time bootstrap
+ // preserves that legacy data; all subsequently created seasons begin as drafts.
  const start=`${today.slice(0,7)}-01`; const end=`${today.slice(0,8)}${String(daysInMonth(today)).padStart(2,"0")}`;
- store.prepare("insert or ignore into seasons(name,theme,start_date,end_date) values(?,?,?,?)").run(monthName(today),"Consistency + Execution",start,end);
+ store.prepare("insert or ignore into seasons(name,theme,start_date,end_date,status,activated_at) values(?,?,?,?,?,current_timestamp)").run(monthName(today),"Consistency + Execution",start,end,"active");
  const season=store.prepare("select * from seasons where start_date=? and end_date=?").get(start,end) as Season;
  store.prepare("update goals set season_id=? where season_id is null and deadline between ? and ?").run(season.id,season.start_date,season.end_date);
  return season;
 }
 export function listSeasons(){ return db().prepare("select * from seasons order by start_date desc").all(); }
-export function createSeason(name:string,theme:string,startDate:string,endDate:string){ return db().prepare("insert into seasons(name,theme,start_date,end_date) values(?,?,?,?)").run(name,theme,startDate,endDate); }
+export function createSeason(name:string,theme:string,startDate:string,endDate:string){ if(endDate<startDate) throw new Error("Season end must follow its start."); return db().prepare("insert into seasons(name,theme,start_date,end_date,status) values(?,?,?,?,?)").run(name,theme,startDate,endDate,"draft"); }
+export function createSeasonPlan(plan: SeasonPlanInput) { return createDraftSeason(db(), plan); }
+export function updateSeasonPlan(seasonId: number, plan: SeasonPlanInput) { return updateDraftSeason(db(), seasonId, plan); }
+export function activateSeasonPlan(seasonId: number) { return activateDraftSeason(db(), seasonId); }
+export function seasonPlanningContext(previousSeasonId?: number) {
+ const store = db();
+ const previous = previousSeasonId === undefined
+   ? store.prepare("select s.* from seasons s join season_reviews r on r.season_id=s.id where r.completed_at is not null order by s.end_date desc limit 1").get() as Season | undefined
+   : findSeason(previousSeasonId);
+ const defaults = nextCalendarMonth(previous?.end_date ?? localDate());
+ const areas = new Set(["Faith", "Fitness", "Odysseus", "Ledgerly", "Career", "Coding", "Finance", "Personal"]);
+ if (previous?.id) (store.prepare("select distinct area from goals where season_id=?").all(previous.id) as Array<{ area: string }>).forEach((goal) => areas.add(goal.area));
+ const reflection = previous?.id ? savedSeasonReflection(previous.id) : undefined;
+ const unfinished: UnfinishedGoal[] = previous?.id ? (store.prepare("select id,area,title,target,current_value,baseline_value,tracking_mode,metric_key,goal_type from goals where season_id=?").all(previous.id) as Array<Record<string, unknown>>).map((goal) => {
+   const raw = goal.tracking_mode === "manual" ? manualGoalValueAsOf(store, { id: Number(goal.id), baseline_value: Number(goal.baseline_value ?? 0), current_value: Number(goal.current_value) }, previous.end_date) : goal.metric_key ? getMetricTotalsAsOf(store, previous, previous.end_date)[goal.metric_key as MetricKey] : Number(goal.current_value);
+   return { id: Number(goal.id), area: String(goal.area), title: String(goal.title), target: Number(goal.target), current: raw, trackingMode: goal.tracking_mode as UnfinishedGoal["trackingMode"], metricKey: goal.metric_key as UnfinishedGoal["metricKey"], goalType: goal.goal_type as UnfinishedGoal["goalType"] };
+ }).filter((goal) => goal.current < goal.target) : [];
+ const recommendedAreas = previous?.id ? (store.prepare("select distinct area from goals where season_id=? order by area").all(previous.id) as Array<{ area: string }>).map((item) => item.area) : [];
+ return { defaults, previous: previous ? { id: previous.id, name: previous.name, startDate: previous.start_date, endDate: previous.end_date, reflection, unfinished } : null, areas: [...areas], recommendedAreas };
+}
 /** Current values always stop at the requested local date. */
 export function metricTotals(season:Season, asOfDate=localDate()): Record<MetricKey,number> { return getMetricTotalsAsOf(db(),season,asOfDate); }
 /** Full-season totals remain available to history and reporting surfaces. */
@@ -294,7 +338,9 @@ export function saveSeasonReview(seasonId: number, reflection: Omit<SeasonReflec
  const season = findSeason(seasonId);
  if (!season?.id) throw new Error("Season not found.");
  const completedAt = complete ? new Date().toISOString() : null;
- return db().prepare(`insert into season_reviews(season_id,proud_of,changed_most,obstacles,lesson,carry_forward,leave_behind,completed_at,updated_at)
+ const result = db().prepare(`insert into season_reviews(season_id,proud_of,changed_most,obstacles,lesson,carry_forward,leave_behind,completed_at,updated_at)
  values(?,?,?,?,?,?,?,?,current_timestamp)
  on conflict(season_id) do update set proud_of=excluded.proud_of,changed_most=excluded.changed_most,obstacles=excluded.obstacles,lesson=excluded.lesson,carry_forward=excluded.carry_forward,leave_behind=excluded.leave_behind,completed_at=case when excluded.completed_at is not null then excluded.completed_at else season_reviews.completed_at end,updated_at=current_timestamp`).run(season.id, reflection.proudOf, reflection.changedMost, reflection.obstacles, reflection.lesson, reflection.carryForward, reflection.leaveBehind, completedAt);
+ if (complete) db().prepare("update seasons set status='completed',completed_at=current_timestamp,updated_at=current_timestamp where id=? and status<>'completed'").run(season.id);
+ return result;
 }
