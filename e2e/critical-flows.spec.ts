@@ -104,3 +104,13 @@ test("plans, carries forward, and activates a new evidence-driven season", async
   expect(dashboard.season.theme).toBe("Build + Stabilise");
   expect(dashboard.goals).toContainEqual(expect.objectContaining({ title: `DSA ${suffix}` }));
 });
+
+test("opens the life timeline and a factual historical date", async ({ page }) => {
+  await page.goto("/history");
+  await expect(page.getByRole("heading", { name: /Where you/i })).toBeVisible();
+  const timeline = await (await page.request.get("/api/history")).json() as { seasons: Array<{ season: { startDate: string } }> };
+  expect(timeline.seasons.length).toBeGreaterThan(0);
+  const date = timeline.seasons.find((item) => item.season.startDate)?.season.startDate;
+  const historical = await (await page.request.get(`/api/history/date?date=${date}`)).json() as { date: string };
+  expect(historical.date).toBe(date);
+});

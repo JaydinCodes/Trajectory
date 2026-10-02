@@ -6,7 +6,7 @@ import type { Goal, MetricKey, Season } from "@/lib/trajectory/types";
 import { addGoal as addGoalRecord, addGoalEvidence, findGoalInSeason, listGoalEvidence, listGoals as listGoalRecords, manualGoalValueAsOf, updateManualGoal } from "@/data/sqlite/goals-repository";
 import { getDeepWorkAttentionInRange, getFullSeasonMetricEvents, getMetricDailyValuesAsOf, getMetricEventsAsOf, getMetricTotals, getMetricTotalsAsOf, getMetricTotalsInRange, metricRangeAsOf } from "@/data/sqlite/metrics-repository";
 import { calculateTrajectorySnapshot } from "@/services/trajectory-service";
-import { calculateSeasonProgress } from "@/lib/trajectory";
+import { calculateGoalTrajectory, calculateSeasonProgress } from "@/lib/trajectory";
 import type { SqliteDatabase } from "@/data/sqlite/types";
 import { calculateWeeklyReview } from "@/services/weekly-review-service";
 import { formatWeekLabel, getPreviousWeekRange, getWeekRange } from "@/domain/review/week-range";
@@ -17,6 +17,8 @@ import { getSeasonWeekRanges } from "@/domain/season-review/season-period";
 import { activateDraftSeason, createDraftSeason, updateDraftSeason } from "@/services/season-planning-service";
 import { nextCalendarMonth } from "@/domain/season-planning/planning";
 import type { SeasonPlanInput, UnfinishedGoal } from "@/domain/season-planning/types";
+import type { AreaHistoryItem, GoalJourneyItem, HistoricalDate, HistoryMetric, SeasonComparison, SeasonTimelineItem } from "@/domain/history/types";
+import { createLifeTimeline, createSeasonComparison } from "@/services/history-service";
 const nodeSqlite: { DatabaseSync: new (filename:string) => SqliteDatabase } = require("node:sqlite");
 
 const dataDir = path.join(process.cwd(), "data");
@@ -128,7 +130,7 @@ export function removeJournal(id:number){return db().prepare("delete from journa
 export function addReview(week:string, accomplishment:string, slipped:string, priority:string){return db().prepare("insert into reviews(week,accomplishment,slipped,priority) values(?,?,?,?)").run(week,accomplishment,slipped,priority);}
 export function listGoals(today=localDate()){const season=getActiveSeason(today);return listGoalRecords(db(),season.id);}
 export function addGoal(area:string,title:string,goalType:string,target:number,weight:number,deadline:string, options:{metricKey?:MetricKey|null;trackingMode?:"derived"|"manual";seasonId?:number|null}={}){return addGoalRecord(db(),area,title,goalType,target,weight,deadline,options);}
-export function updateGoal(id:number,currentValue:number,status:string,effectiveDate=localDate()){return updateManualGoal(db(),id,currentValue,status,effectiveDate,getActiveSeason().id);}
+export function updateGoal(id:number,currentValue:number,status:string,effectiveDate=localDate()){const season=getActiveSeason();if(season.status==="completed")throw new Error("Completed season goals are historical records and cannot be changed.");return updateManualGoal(db(),id,currentValue,status,effectiveDate,season.id);}
 export function listFinance(){return db().prepare("select * from financial_entries order by entry_date desc,id desc").all();}
 export function addFinance(kind:string,category:string,amount:number,date:string,note:string, metadata:{area?:string;project?:string;metricKey?:MetricKey}={}){return db().prepare("insert into financial_entries(kind,category,amount,entry_date,note,area,project,metric_key) values(?,?,?,?,?,?,?,?)").run(kind,category,amount,date,note,metadata.area??null,metadata.project??null,metadata.metricKey??null);}
 export function removeFinance(id:number){return db().prepare("delete from financial_entries where id=?").run(id);}
@@ -196,7 +198,9 @@ export function searchEverything(term:string){const q=`%${term.trim()}%`;if(!ter
  ...store.prepare("select 'journal' as kind,id,content as title,entry_date as date from journal where content like ?").all(q),
  ...store.prepare("select 'goal' as kind,id,title,deadline as date from goals where title like ?").all(q),
  ...store.prepare("select 'milestone' as kind,id,title,achieved_at as date from milestones where title like ?").all(q),
- ...store.prepare("select 'entry' as kind,id,detail as title,entry_date as date from entries where detail like ?").all(q)
+ ...store.prepare("select 'entry' as kind,id,detail as title,entry_date as date from entries where detail like ?").all(q),
+ ...store.prepare("select 'weekly review' as kind,id,coalesce(next_primary_focus,lesson,got_in_way) as title,week_start as date from weekly_reviews where next_primary_focus like ? or lesson like ? or got_in_way like ?").all(q,q,q),
+ ...store.prepare("select 'season review' as kind,r.id,coalesce(r.lesson,r.carry_forward,r.leave_behind) as title,s.end_date as date from season_reviews r join seasons s on s.id=r.season_id where r.lesson like ? or r.carry_forward like ? or r.leave_behind like ?").all(q,q,q)
  ];}
 export function activityDays(){return db().prepare("select entry_date as date,count(*) as count from (select entry_date from entries union all select entry_date from bible_entries union all select entry_date from workouts union all select entry_date from coding_entries union all select entry_date from journal) group by entry_date order by entry_date").all();}
 export function activityDaysFor(metric:string){const sql:Record<string,string>={Bible:"select entry_date as date,count(*) as count from bible_entries group by entry_date",Gym:"select entry_date as date,count(*) as count from workouts group by entry_date",Coding:"select entry_date as date,sum(problems) as count from coding_entries group by entry_date",Journal:"select entry_date as date,count(*) as count from journal group by entry_date",Overall:"select entry_date as date,count(*) as count from (select entry_date from entries union all select entry_date from bible_entries union all select entry_date from workouts union all select entry_date from coding_entries union all select entry_date from journal) group by entry_date"};return db().prepare(sql[metric]??sql.Overall).all();}
@@ -223,6 +227,49 @@ export function dashboard(today=localDate()){
  const season=getActiveSeason(today); const trajectory=trajectorySnapshotFor(season,today);
  const seasonProgress=calculateSeasonProgress(season,today);
  return {...trajectory,season,seasonProgress:{...seasonProgress,percentage:seasonProgress.totalDays?seasonProgress.elapsedDays/seasonProgress.totalDays*100:0},...insights(today)};
+}
+
+const historyMetricLabels: Record<MetricKey, string> = { bible_days: "Bible reading days", gym_sessions: "Gym sessions", dsa_problems: "DSA problems", deep_work_minutes: "Deep work", tutoring_revenue: "Tutoring revenue", savings: "Savings", custom: "Custom" };
+const historyMetricKeys: MetricKey[] = ["bible_days", "gym_sessions", "dsa_problems", "deep_work_minutes", "tutoring_revenue", "savings"];
+const historyStatus = (season: Season): "draft" | "active" | "completed" => season.status === "active" || season.status === "completed" ? season.status : "draft";
+const historyAsOf = (season: Season, today = localDate()) => historyStatus(season) === "active" ? (today < season.end_date ? today : season.end_date) : season.end_date;
+const historyMetrics = (totals: Record<MetricKey, number>): HistoryMetric[] => historyMetricKeys.map((key) => ({ key, label: historyMetricLabels[key], total: totals[key] }));
+
+function historySeasonItem(season: Season, today = localDate()): SeasonTimelineItem {
+ const store = db(); const status = historyStatus(season);
+ if (status === "draft" || today < season.start_date) return { season: { id: season.id!, name: season.name, theme: season.theme, intention: season.intention ?? null, startDate: season.start_date, endDate: season.end_date }, status, trajectory: { start: 0, end: 0, change: 0 }, goals: { total: Number((store.prepare("select count(*) as count from goals where season_id=?").get(season.id) as { count: number }).count), completed: 0, carriedForward: 0 }, metrics: historyMetrics({ bible_days: 0, gym_sessions: 0, dsa_problems: 0, deep_work_minutes: 0, tutoring_revenue: 0, savings: 0, custom: 0 }), milestones: [], dominantAttention: [] };
+ const asOf = historyAsOf(season, today); const review = seasonReview(season.id, asOf); const next = store.prepare("select id,name,theme from seasons where previous_season_id=? order by start_date limit 1").get(season.id) as { id: number; name: string; theme: string } | undefined;
+ const carriedForward = Number((store.prepare("select count(*) as count from goals where carried_from_goal_id in (select id from goals where season_id=?)").get(season.id) as { count: number }).count);
+ return { season: { id: season.id!, name: season.name, theme: season.theme, intention: season.intention ?? null, startDate: season.start_date, endDate: season.end_date }, status, trajectory: { start: review.trajectory.startScore, end: review.trajectory.endScore, change: review.trajectory.change }, goals: { total: review.goals.all.length, completed: review.goals.completed.length, carriedForward }, metrics: review.metrics, milestones: review.milestones, review: review.reflection?.completedAt ? { lesson: review.reflection.lesson, carryForward: review.reflection.carryForward, leaveBehind: review.reflection.leaveBehind, completedAt: review.reflection.completedAt } : undefined, dominantAttention: review.attention.slice(0, 3), nextSeason: next };
+}
+
+/** Season-level archive summaries. Each completed season is calculated at its own end date. */
+export function lifeTimeline(today = localDate()) { return createLifeTimeline((listSeasons() as Season[]).map((season) => historySeasonItem(season, today))); }
+export function historySeason(seasonId: number, today = localDate()) { const season = findSeason(seasonId); if (!season?.id) throw new Error("Season not found."); return { item: historySeasonItem(season, today), review: historyStatus(season) === "draft" || today < season.start_date ? undefined : seasonReview(season.id, historyAsOf(season, today)) }; }
+
+function findHistorySeasonForDate(value: string): Season | undefined { return db().prepare("select * from seasons where status in ('active','completed') and start_date<=? and end_date>=? order by case status when 'active' then 0 else 1 end, start_date desc limit 1").get(value, value) as Season | undefined; }
+export function historyDate(value: string): HistoricalDate {
+ const season = findHistorySeasonForDate(value); if (!season?.id) return { date: value, season: null, trajectory: null, goals: [], metrics: [] };
+ const snapshot = trajectorySnapshotFor(season, value); const metrics = metricTotals(season, value);
+ return { date: value, season: { id: season.id, name: season.name, theme: season.theme }, trajectory: { score: snapshot.score, expected: snapshot.expected, projected: snapshot.projected }, goals: snapshot.goals.map((goal) => ({ id: goal.id, area: goal.area, title: goal.title, current: goal.current, target: goal.target, percentage: goal.actualPercentage })), metrics: historyMetrics(metrics) };
+}
+
+function historyGoalValue(goal: Goal, season: Season, asOf: string) { const derived = goal.tracking_mode === "derived" && goal.metric_key ? metricTotals(season, asOf)[goal.metric_key] : undefined; return calculateGoalTrajectory(goal.tracking_mode === "manual" ? { ...goal, current_value: manualGoalValueAsOf(db(), goal, asOf) } : goal, season, asOf, derived); }
+export function goalJourney(goalId: number, today = localDate()): GoalJourneyItem[] {
+ const store = db(); const ancestors = new Set<number>(); let current = store.prepare("select * from goals where id=?").get(goalId) as Goal | undefined; if (!current) throw new Error("Goal not found.");
+ while (current.carried_from_goal_id && !ancestors.has(current.id)) { ancestors.add(current.id); const parent = store.prepare("select * from goals where id=?").get(current.carried_from_goal_id) as Goal | undefined; if (!parent) break; current = parent; }
+ const lineage: Goal[] = []; const descendants = new Set<number>(); let cursor: Goal | undefined = current;
+ while (cursor && !descendants.has(cursor.id)) { descendants.add(cursor.id); lineage.push(cursor); cursor = store.prepare("select * from goals where carried_from_goal_id=? order by id limit 1").get(cursor.id) as Goal | undefined; }
+ return lineage.map((goal) => { const season = findSeason(goal.season_id!); if (!season?.id) throw new Error("Goal season not found."); const progress = historyGoalValue(goal, season, historyAsOf(season, today)); return { id: goal.id, seasonId: season.id, seasonName: season.name, seasonStartDate: season.start_date, title: goal.title, area: goal.area, current: progress.current, target: goal.target, percentage: progress.actualPercentage, status: goal.status }; }).sort((left, right) => left.seasonStartDate.localeCompare(right.seasonStartDate));
+}
+
+export function areaHistory(area: string, today = localDate()): AreaHistoryItem[] {
+ const store = db(); return (listSeasons() as Season[]).filter((season) => historyStatus(season) !== "draft").map((season) => { const asOf = historyAsOf(season, today); const goals = (listGoalRecords(store, season.id) as Goal[]).filter((goal) => goal.area.toLowerCase() === area.toLowerCase()); if (!goals.length) return undefined; const metrics = metricTotals(season, asOf); const metricKeys = [...new Set(goals.flatMap((goal) => goal.metric_key ? [goal.metric_key] : []))]; return { seasonId: season.id!, seasonName: season.name, startDate: season.start_date, status: historyStatus(season), goals: goals.map((goal) => { const progress = historyGoalValue(goal, season, asOf); return { id: goal.id, title: goal.title, current: progress.current, target: goal.target, percentage: progress.actualPercentage }; }), metrics: metricKeys.map((key) => ({ key, label: historyMetricLabels[key], total: metrics[key] })), milestones: (store.prepare("select id,area,title,achieved_at from milestones where area=? and achieved_at between ? and ? order by achieved_at").all(area, season.start_date, asOf) as Array<{ id: number; area: string; title: string; achieved_at: string }>).map((milestone) => ({ id: milestone.id, area: milestone.area, title: milestone.title, achievedAt: milestone.achieved_at })) } as AreaHistoryItem | undefined; }).filter((item): item is AreaHistoryItem => Boolean(item)).sort((left, right) => right.startDate.localeCompare(left.startDate));
+}
+
+function comparisonSummary(seasonId: number, today = localDate()): SeasonComparison["left"] { const item = historySeason(seasonId, today).item; return { id: item.season.id, name: item.season.name, theme: item.season.theme, trajectoryEnd: item.trajectory.end, goalsCompleted: item.goals.completed, areasActive: new Set((listGoalRecords(db(), item.season.id) as Goal[]).map((goal) => goal.area)).size, milestones: item.milestones.length, metrics: item.metrics }; }
+export function seasonComparison(leftId: number, rightId: number, today = localDate()) { if (leftId === rightId) throw new Error("Choose two different seasons to compare."); return createSeasonComparison(comparisonSummary(leftId, today), comparisonSummary(rightId, today)); }
+export function historyYear(year: number) { if (!Number.isInteger(year) || year < 1900 || year > 9999) throw new Error("Year is invalid."); const start = `${year}-01-01`; const end = `${year}-12-31`; const store = db(); const seasons = (store.prepare("select * from seasons where start_date between ? and ? order by start_date").all(start, end) as Season[]).map((season) => ({ id: season.id!, name: season.name, theme: season.theme, status: historyStatus(season), startDate: season.start_date, endDate: season.end_date })); const milestones = Number((store.prepare("select count(*) as count from milestones where achieved_at between ? and ?").get(start, end) as { count: number }).count); return { year, seasons, seasonsCompleted: seasons.filter((season) => season.status === "completed").length, milestones, metrics: historyMetrics(getMetricTotalsInRange(store, start, end)) };
 }
 
 const emptyEvidence = (): EvidenceSummary => ({ bibleDays:0, workouts:0, dsaProblems:0, deepWorkMinutes:0, tutoringRevenue:0, records:0 });
@@ -337,6 +384,7 @@ export function seasonReviewNavigation(today = localDate()) {
 export function saveSeasonReview(seasonId: number, reflection: Omit<SeasonReflection, "completedAt">, complete: boolean) {
  const season = findSeason(seasonId);
  if (!season?.id) throw new Error("Season not found.");
+ if (savedSeasonReflection(season.id)?.completedAt) throw new Error("Completed season reviews are historical records and cannot be changed.");
  const completedAt = complete ? new Date().toISOString() : null;
  const result = db().prepare(`insert into season_reviews(season_id,proud_of,changed_most,obstacles,lesson,carry_forward,leave_behind,completed_at,updated_at)
  values(?,?,?,?,?,?,?,?,current_timestamp)

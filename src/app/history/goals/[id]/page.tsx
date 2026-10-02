@@ -1,0 +1,6 @@
+"use client";
+import Link from "next/link";
+import { useParams } from "next/navigation";
+import { useEffect, useState } from "react";
+type Journey = Array<{ id: number; seasonId: number; seasonName: string; seasonStartDate: string; title: string; area: string; current: number; target: number; percentage: number; status: string }>;
+export default function GoalJourneyPage() { const { id } = useParams<{ id: string }>(); const [journey, setJourney] = useState<Journey>(); useEffect(() => { void fetch(`/api/history/goals/${id}`).then((response) => response.json()).then(setJourney); }, [id]); return <main className="history-detail"><Link className="back" href="/history">← History</Link><header className="history-hero"><p className="eyebrow">Goal journey</p><h1>{journey?.[0]?.title ?? "Goal history"}</h1><p>Each season keeps its own goal record. Carry-forward links show the chapters without rewriting the past.</p></header><div className="goal-journey">{journey?.map((goal, index) => <article key={goal.id}><span>{goal.seasonName}</span><i>{index ? "↓" : ""}</i><h2>{goal.title}</h2><b>{goal.current} / {goal.target}</b><small>{Math.round(goal.percentage)}% · {goal.area}</small><Link href={`/history/seasons/${goal.seasonId}`}>Open season →</Link></article>)}</div></main>; }
