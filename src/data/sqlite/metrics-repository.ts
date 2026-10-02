@@ -55,6 +55,11 @@ export function getMetricTotals(database: SqliteDatabase, season: Season): Recor
   return totalsFor((metric) => getFullSeasonMetricEvents(database, metric, season));
 }
 
+/** Weekly reporting uses the exact requested range while preserving metric aggregation semantics. */
+export function getMetricTotalsInRange(database: SqliteDatabase, startDate: string, endDate: string): Record<MetricKey, number> {
+  return totalsFor((metric) => getMetricEvents(database, metric, { start_date: startDate, end_date: endDate }));
+}
+
 /** Totals used by live trajectory calculations. Future evidence is never included. */
 export function getMetricTotalsAsOf(database: SqliteDatabase, season: Season, asOfDate: string): Record<MetricKey, number> {
   const asOfRange = metricRangeAsOf(season, asOfDate);

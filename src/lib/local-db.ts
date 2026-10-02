@@ -3,11 +3,14 @@ import fs from "node:fs";
 import path from "node:path";
 import { localDate, monthName, daysInMonth } from "@/lib/date-time";
 import type { Goal, MetricKey, Season } from "@/lib/trajectory/types";
-import { addGoal as addGoalRecord, addGoalEvidence, findGoalInSeason, listGoalEvidence, listGoals as listGoalRecords, updateGoal as updateGoalRecord } from "@/data/sqlite/goals-repository";
-import { getFullSeasonMetricEvents, getMetricDailyValuesAsOf, getMetricEventsAsOf, getMetricTotals, getMetricTotalsAsOf, metricRangeAsOf } from "@/data/sqlite/metrics-repository";
+import { addGoal as addGoalRecord, addGoalEvidence, findGoalInSeason, listGoalEvidence, listGoals as listGoalRecords, manualGoalValueAsOf, updateManualGoal } from "@/data/sqlite/goals-repository";
+import { getFullSeasonMetricEvents, getMetricDailyValuesAsOf, getMetricEventsAsOf, getMetricTotals, getMetricTotalsAsOf, getMetricTotalsInRange, metricRangeAsOf } from "@/data/sqlite/metrics-repository";
 import { calculateTrajectorySnapshot } from "@/services/trajectory-service";
 import { calculateSeasonProgress } from "@/lib/trajectory";
 import type { SqliteDatabase } from "@/data/sqlite/types";
+import { calculateWeeklyReview } from "@/services/weekly-review-service";
+import { formatWeekLabel, getPreviousWeekRange, getWeekRange } from "@/domain/review/week-range";
+import type { EvidenceSummary, WeeklyReflection } from "@/domain/review/types";
 const nodeSqlite: { DatabaseSync: new (filename:string) => SqliteDatabase } = require("node:sqlite");
 
 const dataDir = path.join(process.cwd(), "data");
@@ -43,10 +46,13 @@ function db() {
     create table if not exists season_snapshots (id integer primary key, month text not null, bible_days integer not null default 0, gym_sessions integer not null default 0, coding_problems integer not null default 0, deep_work_minutes integer not null default 0, created_at text not null default current_timestamp, unique(month));
     create table if not exists goal_evidence (id integer primary key, goal_id integer not null references goals(id) on delete cascade, kind text not null, value text not null, note text, created_at text not null default current_timestamp);
     create table if not exists seasons (id integer primary key, name text not null, theme text not null default '', start_date text not null, end_date text not null, created_at text not null default current_timestamp, unique(start_date, end_date));
+    create table if not exists goal_updates (id integer primary key, goal_id integer not null references goals(id) on delete cascade, value real not null, status text not null default 'active', effective_date text not null, note text, created_at text not null default current_timestamp);
+    create table if not exists weekly_reviews (id integer primary key, season_id integer not null references seasons(id) on delete cascade, week_start text not null, week_end text not null, proud_of text not null default '', got_in_way text not null default '', lesson text not null default '', next_primary_focus text not null default '', next_secondary_focus text not null default '', completed_at text, created_at text not null default current_timestamp, updated_at text not null default current_timestamp, unique(season_id, week_start));
   `);
   addColumn(database, "goals", "metric_key text");
   addColumn(database, "goals", "tracking_mode text not null default 'manual'");
   addColumn(database, "goals", "season_id integer");
+  addColumn(database, "goals", "baseline_value real not null default 0");
   addColumn(database, "entries", "area text");
   addColumn(database, "entries", "project text");
   addColumn(database, "entries", "metric_key text");
@@ -56,6 +62,10 @@ function db() {
   const malformedSeasons=database.prepare("select id,start_date from seasons where length(end_date)<>10").all() as Array<{id:number;start_date:string}>;
   for(const season of malformedSeasons){const end=`${season.start_date.slice(0,8)}${String(daysInMonth(season.start_date)).padStart(2,"0")}`;database.prepare("update seasons set end_date=? where id=?").run(end,season.id);}
   database.exec("update goals set deadline=(select end_date from seasons where seasons.id=goals.season_id) where length(deadline)<>10 and season_id is not null");
+  // Existing manual values had no event history. Preserve their visible value as the safe baseline; future edits are append-only.
+  database.exec("update goals set baseline_value=current_value where tracking_mode='manual' and baseline_value=0 and current_value<>0");
+  database.exec("create index if not exists goal_updates_goal_date_idx on goal_updates(goal_id,effective_date desc,id desc)");
+  database.exec("create index if not exists weekly_reviews_season_week_idx on weekly_reviews(season_id,week_start)");
   // Legacy records receive explicit metadata once; new records never infer it from free text.
   database.exec("update entries set metric_key='dsa_problems', area='Coding' where metric_key is null and type='DSA'");
   database.exec("update entries set metric_key='deep_work_minutes' where metric_key is null and type='Deep work'");
@@ -92,7 +102,7 @@ export function removeJournal(id:number){return db().prepare("delete from journa
 export function addReview(week:string, accomplishment:string, slipped:string, priority:string){return db().prepare("insert into reviews(week,accomplishment,slipped,priority) values(?,?,?,?)").run(week,accomplishment,slipped,priority);}
 export function listGoals(today=localDate()){const season=getActiveSeason(today);return listGoalRecords(db(),season.id);}
 export function addGoal(area:string,title:string,goalType:string,target:number,weight:number,deadline:string, options:{metricKey?:MetricKey|null;trackingMode?:"derived"|"manual";seasonId?:number|null}={}){return addGoalRecord(db(),area,title,goalType,target,weight,deadline,options);}
-export function updateGoal(id:number,currentValue:number,status:string){return updateGoalRecord(db(),id,currentValue,status,getActiveSeason().id);}
+export function updateGoal(id:number,currentValue:number,status:string,effectiveDate=localDate()){return updateManualGoal(db(),id,currentValue,status,effectiveDate,getActiveSeason().id);}
 export function listFinance(){return db().prepare("select * from financial_entries order by entry_date desc,id desc").all();}
 export function addFinance(kind:string,category:string,amount:number,date:string,note:string, metadata:{area?:string;project?:string;metricKey?:MetricKey}={}){return db().prepare("insert into financial_entries(kind,category,amount,entry_date,note,area,project,metric_key) values(?,?,?,?,?,?,?,?)").run(kind,category,amount,date,note,metadata.area??null,metadata.project??null,metadata.metricKey??null);}
 export function removeFinance(id:number){return db().prepare("delete from financial_entries where id=?").run(id);}
@@ -116,11 +126,17 @@ export function createSeason(name:string,theme:string,startDate:string,endDate:s
 export function metricTotals(season:Season, asOfDate=localDate()): Record<MetricKey,number> { return getMetricTotalsAsOf(db(),season,asOfDate); }
 /** Full-season totals remain available to history and reporting surfaces. */
 export function fullSeasonMetricTotals(season:Season): Record<MetricKey,number> { return getMetricTotals(db(),season); }
+function goalsForSeasonAsOf(season: Season, asOfDate: string): Goal[] {
+ return (listGoalRecords(db(),season.id) as Goal[]).map((goal) => goal.tracking_mode === "manual" ? { ...goal, current_value: manualGoalValueAsOf(db(), goal, asOfDate) } : goal);
+}
+function trajectorySnapshotFor(season: Season, asOfDate: string) {
+ return calculateTrajectorySnapshot({goals:goalsForSeasonAsOf(season,asOfDate),season,today:asOfDate,metrics:metricTotals(season,asOfDate),dailyValues:(metric,start,end)=>getMetricDailyValuesAsOf(db(),metric,season,asOfDate,start,end)});
+}
 export function goalsWithProgress(today=localDate()) {
- const season=getActiveSeason(today); const snapshot=calculateTrajectorySnapshot({goals:listGoals(today) as Goal[],season,today,metrics:metricTotals(season,today),dailyValues:(metric,start,end)=>getMetricDailyValuesAsOf(db(),metric,season,today,start,end)});
+ const season=getActiveSeason(today); const snapshot=trajectorySnapshotFor(season,today);
  return snapshot.goals;
 }
-export function areaMomentum(area:string,today=localDate()) { const season=getActiveSeason(today); return calculateTrajectorySnapshot({goals:listGoals(today) as Goal[],season,today,metrics:metricTotals(season,today),dailyValues:(metric,start,end)=>getMetricDailyValuesAsOf(db(),metric,season,today,start,end)}).areas.find((item)=>item.area===area)?.momentum??"insufficient_data"; }
+export function areaMomentum(area:string,today=localDate()) { const season=getActiveSeason(today); return trajectorySnapshotFor(season,today).areas.find((item)=>item.area===area)?.momentum??"insufficient_data"; }
 export function insights(today=localDate()){const store=db();const season=getActiveSeason(today);const dateRange=metricRangeAsOf(season,today);const byType=dateRange?store.prepare("select type, count(*) as count, coalesce(sum(amount),0) as total from entries where entry_date between ? and ? group by type").all(dateRange.start_date,dateRange.end_date) as Array<{type:string;count:number;total:number}>:[];const metrics=metricTotals(season,today);return {byType,bibleDays:metrics.bible_days,gymSessions:metrics.gym_sessions,codingProblems:metrics.dsa_problems,deepWorkMinutes:metrics.deep_work_minutes,tutoringRevenue:metrics.tutoring_revenue};}
 export function listMilestones(){return db().prepare("select * from milestones order by achieved_at desc,id desc").all();}
 export function addMilestone(area:string,title:string,date:string,note:string){return db().prepare("insert into milestones(area,title,achieved_at,note) values(?,?,?,?)").run(area,title,date,note);}
@@ -155,7 +171,52 @@ export function correlations(){const store=db();const trained=store.prepare("sel
 export function comparison(){const previous=db().prepare("select * from season_snapshots order by id desc limit 1").get() as Record<string,unknown>|undefined;const current=insights();return {previous,current:{month:monthName(),bible_days:current.bibleDays,gym_sessions:current.gymSessions,coding_problems:current.codingProblems,deep_work_minutes:current.deepWorkMinutes}}}
 export function saveSnapshot(month:string){const d=insights();return db().prepare("insert into season_snapshots(month,bible_days,gym_sessions,coding_problems,deep_work_minutes) values(?,?,?,?,?) on conflict(month) do update set bible_days=excluded.bible_days,gym_sessions=excluded.gym_sessions,coding_problems=excluded.coding_problems,deep_work_minutes=excluded.deep_work_minutes").run(month,d.bibleDays,d.gymSessions,d.codingProblems,d.deepWorkMinutes)}
 export function dashboard(today=localDate()){
- const season=getActiveSeason(today); const trajectory=calculateTrajectorySnapshot({goals:listGoals(today) as Goal[],season,today,metrics:metricTotals(season,today),dailyValues:(metric,start,end)=>getMetricDailyValuesAsOf(db(),metric,season,today,start,end)});
+ const season=getActiveSeason(today); const trajectory=trajectorySnapshotFor(season,today);
  const seasonProgress=calculateSeasonProgress(season,today);
  return {...trajectory,season,seasonProgress:{...seasonProgress,percentage:seasonProgress.totalDays?seasonProgress.elapsedDays/seasonProgress.totalDays*100:0},...insights(today)};
+}
+
+const emptyEvidence = (): EvidenceSummary => ({ bibleDays:0, workouts:0, dsaProblems:0, deepWorkMinutes:0, tutoringRevenue:0, records:0 });
+function evidenceSummaryForRange(startDate: string, endDate: string): EvidenceSummary {
+ const totals=getMetricTotalsInRange(db(),startDate,endDate);
+ const records=db().prepare(`select count(*) as count from (
+   select id from bible_entries where entry_date between ? and ?
+   union all select id from workouts where entry_date between ? and ?
+   union all select id from coding_entries where entry_date between ? and ?
+   union all select id from entries where entry_date between ? and ? and metric_key is not null
+   union all select id from financial_entries where entry_date between ? and ? and metric_key is not null
+ )`).get(startDate,endDate,startDate,endDate,startDate,endDate,startDate,endDate,startDate,endDate) as {count:number}|undefined;
+ return { bibleDays:totals.bible_days, workouts:totals.gym_sessions, dsaProblems:totals.dsa_problems, deepWorkMinutes:totals.deep_work_minutes, tutoringRevenue:totals.tutoring_revenue, records:Number(records?.count??0) };
+}
+function savedWeeklyReflection(seasonId: number, weekStart: string): WeeklyReflection | undefined {
+ const row=db().prepare("select proud_of,got_in_way,lesson,next_primary_focus,next_secondary_focus,completed_at from weekly_reviews where season_id=? and week_start=?").get(seasonId,weekStart) as Record<string,unknown>|undefined;
+ if(!row) return undefined;
+ return { proudOf:String(row.proud_of??""), gotInWay:String(row.got_in_way??""), lesson:String(row.lesson??""), nextPrimaryFocus:String(row.next_primary_focus??""), nextSecondaryFocus:String(row.next_secondary_focus??""), completedAt:row.completed_at?String(row.completed_at):null };
+}
+function previousWeeklyReflection(weekStart: string): WeeklyReflection | undefined {
+ const row=db().prepare("select proud_of,got_in_way,lesson,next_primary_focus,next_secondary_focus,completed_at from weekly_reviews where week_start=? order by completed_at desc,id desc limit 1").get(weekStart) as Record<string,unknown>|undefined;
+ if(!row) return undefined;
+ return { proudOf:String(row.proud_of??""), gotInWay:String(row.got_in_way??""), lesson:String(row.lesson??""), nextPrimaryFocus:String(row.next_primary_focus??""), nextSecondaryFocus:String(row.next_secondary_focus??""), completedAt:row.completed_at?String(row.completed_at):null };
+}
+
+/** Generated review analysis is recomputed from evidence. Only the user's reflection is persisted. */
+export function weeklyReview(date=localDate()) {
+ const range=getWeekRange(date); const previousRange=getPreviousWeekRange(range); const season=getActiveSeason(date); const saved=savedWeeklyReflection(season.id!,range.startDate);
+ const endAsOf=range.endDate > localDate() ? localDate() : range.endDate;
+ const startSnapshot=trajectorySnapshotFor(season,range.startDate);
+ const endSnapshot=trajectorySnapshotFor(season,endAsOf);
+ const attention=db().prepare("select coalesce(nullif(project,''),nullif(area,''),'Unassigned') as name, coalesce(sum(amount),0) as minutes from entries where metric_key='deep_work_minutes' and entry_date between ? and ? group by coalesce(nullif(project,''),nullif(area,''),'Unassigned')").all(range.startDate,endAsOf) as Array<{name:string;minutes:number}>;
+ const milestones=db().prepare("select id,area,title,achieved_at from milestones where achieved_at between ? and ? order by achieved_at,id").all(range.startDate,endAsOf) as Array<{id:number;area:string;title:string;achieved_at:string}>;
+ const journal=db().prepare("select id,content,entry_date from journal where entry_date between ? and ? order by entry_date desc,id desc limit 2").all(range.startDate,endAsOf) as Array<{id:number;content:string;entry_date:string}>;
+ const prior=previousWeeklyReflection(previousRange.startDate);
+ const state=range.endDate >= localDate() ? "in_progress" : saved?.completedAt ? "complete" : "not_reviewed";
+ return { analysis:calculateWeeklyReview({ range, label:formatWeekLabel(range), startGoals:startSnapshot.goals, endGoals:endSnapshot.goals, startScore:startSnapshot.score, endScore:endSnapshot.score, attention, evidence:evidenceSummaryForRange(range.startDate,endAsOf), previousWeek:previousRange.endDate > localDate()?emptyEvidence():evidenceSummaryForRange(previousRange.startDate,previousRange.endDate), milestones:milestones.map((item)=>({id:item.id,area:item.area,title:item.title,achievedAt:item.achieved_at})), journal:journal.map((item)=>({id:item.id,content:item.content,entryDate:item.entry_date})), state, priorCommitment:prior?.nextPrimaryFocus || undefined }), reflection:saved };
+}
+
+export function saveWeeklyReview(date:string, reflection: Omit<WeeklyReflection,"completedAt">, complete:boolean) {
+ const range=getWeekRange(date); if(range.startDate>localDate()) throw new Error("Future weekly reviews cannot be saved.");
+ const season=getActiveSeason(date); const now=complete?new Date().toISOString():null;
+ return db().prepare(`insert into weekly_reviews(season_id,week_start,week_end,proud_of,got_in_way,lesson,next_primary_focus,next_secondary_focus,completed_at,updated_at)
+ values(?,?,?,?,?,?,?,?,?,current_timestamp)
+ on conflict(season_id,week_start) do update set week_end=excluded.week_end,proud_of=excluded.proud_of,got_in_way=excluded.got_in_way,lesson=excluded.lesson,next_primary_focus=excluded.next_primary_focus,next_secondary_focus=excluded.next_secondary_focus,completed_at=case when excluded.completed_at is not null then excluded.completed_at else weekly_reviews.completed_at end,updated_at=current_timestamp`).run(season.id,range.startDate,range.endDate,reflection.proudOf,reflection.gotInWay,reflection.lesson,reflection.nextPrimaryFocus,reflection.nextSecondaryFocus,now);
 }

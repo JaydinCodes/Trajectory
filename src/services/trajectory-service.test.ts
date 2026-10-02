@@ -11,4 +11,11 @@ describe("trajectory service", () => {
     expect(snapshot.goals[0].current).toBe(5);
     expect(snapshot.areas[0]).toMatchObject({ area: "Coding", score: 5, expected: 3, momentum: "steady" });
   });
+  it("produces different historical snapshots when evidence is added later", () => {
+    const season = { id: 1, name: "October", theme: "", start_date: "2026-10-01", end_date: "2026-10-31" };
+    const monday = calculateTrajectorySnapshot({ goals: [goal], season, today: "2026-10-05", metrics: { ...metrics, dsa_problems: 5 }, dailyValues: () => [5] });
+    const sunday = calculateTrajectorySnapshot({ goals: [goal], season, today: "2026-10-11", metrics: { ...metrics, dsa_problems: 15 }, dailyValues: () => [10, 5] });
+    expect(monday.goals[0].current).toBe(5);
+    expect(sunday.goals[0].current).toBe(15);
+  });
 });

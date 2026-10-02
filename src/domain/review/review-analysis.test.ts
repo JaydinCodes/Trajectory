@@ -1,0 +1,14 @@
+import { describe, expect, it } from "vitest";
+import { buildWeeklyReviewAnalysis } from "./review-analysis";
+import type { GoalProgress } from "../../lib/trajectory/types";
+
+const goal = (overrides: Partial<GoalProgress>): GoalProgress => ({ id: 1, area: "Coding", title: "DSA", goal_type: "count", target: 100, current_value: 0, weight: 1, deadline: "2026-10-31", status: "active", metric_key: "dsa_problems", tracking_mode: "derived", season_id: 1, current: 18, actualPercentage: 18, expectedPercentage: 20, expectedValue: 20, deltaPercentage: -2, projectedValue: 90, projectedPercentage: 90, trajectoryStatus: "on_track", ...overrides });
+const analysis = (start: GoalProgress, end: GoalProgress) => buildWeeklyReviewAnalysis({ range: { startDate: "2026-09-28", endDate: "2026-10-04" }, label: "Sep 28 — Oct 4", startGoals: [start], endGoals: [end], startScore: start.actualPercentage, endScore: end.actualPercentage, attention: [], evidence: { bibleDays: 0, workouts: 0, dsaProblems: 0, deepWorkMinutes: 0, tutoringRevenue: 0, records: 0 }, previousWeek: { bibleDays: 0, workouts: 0, dsaProblems: 0, deepWorkMinutes: 0, tutoringRevenue: 0, records: 0 }, milestones: [], journal: [], state: "complete" });
+
+describe("weekly goal movement", () => {
+  it("classifies meaningful evidence as advanced", () => expect(analysis(goal({}), goal({ current: 32, actualPercentage: 32, expectedPercentage: 23, deltaPercentage: 9, trajectoryStatus: "ahead" })).goals.all[0].movement).toBe("advanced"));
+  it("classifies reaching a target during the week as completed", () => expect(analysis(goal({ current: 95, actualPercentage: 95 }), goal({ current: 100, actualPercentage: 100, trajectoryStatus: "completed" })).goals.all[0].movement).toBe("completed"));
+  it("classifies expected but absent movement as stalled", () => expect(analysis(goal({ current: 0, actualPercentage: 0, expectedPercentage: 0, deltaPercentage: 0 }), goal({ current: 0, actualPercentage: 0, expectedPercentage: 3, deltaPercentage: -3, trajectoryStatus: "on_track" })).goals.all[0].movement).toBe("stalled"));
+  it("classifies a material trajectory deterioration as drifted", () => expect(analysis(goal({ expectedPercentage: 20 }), goal({ expectedPercentage: 25, actualPercentage: 18, deltaPercentage: -7, trajectoryStatus: "slightly_behind" })).goals.all[0].movement).toBe("drifted"));
+  it("does not produce insights for an empty week", () => expect(buildWeeklyReviewAnalysis({ range: { startDate: "2026-09-28", endDate: "2026-10-04" }, label: "Sep 28 — Oct 4", startGoals: [], endGoals: [], startScore: 0, endScore: 0, attention: [], evidence: { bibleDays: 0, workouts: 0, dsaProblems: 0, deepWorkMinutes: 0, tutoringRevenue: 0, records: 0 }, previousWeek: { bibleDays: 0, workouts: 0, dsaProblems: 0, deepWorkMinutes: 0, tutoringRevenue: 0, records: 0 }, milestones: [], journal: [], state: "not_reviewed" }).highlights).toEqual([]));
+});

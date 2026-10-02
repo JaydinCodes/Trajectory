@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { getMetricDailyValuesAsOf, getMetricEventsAsOf, getMetricTotals, getMetricTotalsAsOf } from "./metrics-repository";
+import { getMetricDailyValuesAsOf, getMetricEventsAsOf, getMetricTotals, getMetricTotalsAsOf, getMetricTotalsInRange } from "./metrics-repository";
 import { calculateTrajectorySnapshot } from "../../services/trajectory-service";
 import type { Goal } from "../../lib/trajectory/types";
 import type { SqliteDatabase } from "./types";
@@ -56,5 +56,10 @@ describe("as-of metric definitions", () => {
     expect(getMetricTotals(database, november).dsa_problems).toBe(0);
     expect(getMetricTotalsAsOf(database, october, "2026-10-14").dsa_problems).toBe(14);
     expect(getMetricDailyValuesAsOf(database, "dsa_problems", november, "2026-11-02", "2026-10-01", "2026-11-02")).toEqual([]);
+  });
+
+  it("keeps weekly evidence inside the requested date boundaries", () => {
+    expect(getMetricTotalsInRange(database, "2026-10-02", "2026-10-02").dsa_problems).toBe(5);
+    expect(getMetricTotalsInRange(database, "2026-10-03", "2026-10-13").dsa_problems).toBe(0);
   });
 });
