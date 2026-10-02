@@ -4,13 +4,16 @@ import path from "node:path";
 import { localDate, monthName, daysInMonth } from "@/lib/date-time";
 import type { Goal, MetricKey, Season } from "@/lib/trajectory/types";
 import { addGoal as addGoalRecord, addGoalEvidence, findGoalInSeason, listGoalEvidence, listGoals as listGoalRecords, manualGoalValueAsOf, updateManualGoal } from "@/data/sqlite/goals-repository";
-import { getFullSeasonMetricEvents, getMetricDailyValuesAsOf, getMetricEventsAsOf, getMetricTotals, getMetricTotalsAsOf, getMetricTotalsInRange, metricRangeAsOf } from "@/data/sqlite/metrics-repository";
+import { getDeepWorkAttentionInRange, getFullSeasonMetricEvents, getMetricDailyValuesAsOf, getMetricEventsAsOf, getMetricTotals, getMetricTotalsAsOf, getMetricTotalsInRange, metricRangeAsOf } from "@/data/sqlite/metrics-repository";
 import { calculateTrajectorySnapshot } from "@/services/trajectory-service";
 import { calculateSeasonProgress } from "@/lib/trajectory";
 import type { SqliteDatabase } from "@/data/sqlite/types";
 import { calculateWeeklyReview } from "@/services/weekly-review-service";
 import { formatWeekLabel, getPreviousWeekRange, getWeekRange } from "@/domain/review/week-range";
 import type { EvidenceSummary, WeeklyReflection } from "@/domain/review/types";
+import { calculateSeasonReview } from "@/services/season-review-service";
+import type { SeasonReflection, SeasonReview, WeeklyReviewSummary } from "@/domain/season-review/types";
+import { getSeasonWeekRanges } from "@/domain/season-review/season-period";
 const nodeSqlite: { DatabaseSync: new (filename:string) => SqliteDatabase } = require("node:sqlite");
 
 const dataDir = path.join(process.cwd(), "data");
@@ -48,6 +51,7 @@ function db() {
     create table if not exists seasons (id integer primary key, name text not null, theme text not null default '', start_date text not null, end_date text not null, created_at text not null default current_timestamp, unique(start_date, end_date));
     create table if not exists goal_updates (id integer primary key, goal_id integer not null references goals(id) on delete cascade, value real not null, status text not null default 'active', effective_date text not null, note text, created_at text not null default current_timestamp);
     create table if not exists weekly_reviews (id integer primary key, season_id integer not null references seasons(id) on delete cascade, week_start text not null, week_end text not null, proud_of text not null default '', got_in_way text not null default '', lesson text not null default '', next_primary_focus text not null default '', next_secondary_focus text not null default '', completed_at text, created_at text not null default current_timestamp, updated_at text not null default current_timestamp, unique(season_id, week_start));
+    create table if not exists season_reviews (id integer primary key, season_id integer not null references seasons(id) on delete cascade, proud_of text not null default '', changed_most text not null default '', obstacles text not null default '', lesson text not null default '', carry_forward text not null default '', leave_behind text not null default '', completed_at text, created_at text not null default current_timestamp, updated_at text not null default current_timestamp, unique(season_id));
   `);
   addColumn(database, "goals", "metric_key text");
   addColumn(database, "goals", "tracking_mode text not null default 'manual'");
@@ -66,6 +70,7 @@ function db() {
   database.exec("update goals set baseline_value=current_value where tracking_mode='manual' and baseline_value=0 and current_value<>0");
   database.exec("create index if not exists goal_updates_goal_date_idx on goal_updates(goal_id,effective_date desc,id desc)");
   database.exec("create index if not exists weekly_reviews_season_week_idx on weekly_reviews(season_id,week_start)");
+  database.exec("create index if not exists season_reviews_season_idx on season_reviews(season_id)");
   // Legacy records receive explicit metadata once; new records never infer it from free text.
   database.exec("update entries set metric_key='dsa_problems', area='Coding' where metric_key is null and type='DSA'");
   database.exec("update entries set metric_key='deep_work_minutes' where metric_key is null and type='Deep work'");
@@ -219,4 +224,77 @@ export function saveWeeklyReview(date:string, reflection: Omit<WeeklyReflection,
  return db().prepare(`insert into weekly_reviews(season_id,week_start,week_end,proud_of,got_in_way,lesson,next_primary_focus,next_secondary_focus,completed_at,updated_at)
  values(?,?,?,?,?,?,?,?,?,current_timestamp)
  on conflict(season_id,week_start) do update set week_end=excluded.week_end,proud_of=excluded.proud_of,got_in_way=excluded.got_in_way,lesson=excluded.lesson,next_primary_focus=excluded.next_primary_focus,next_secondary_focus=excluded.next_secondary_focus,completed_at=case when excluded.completed_at is not null then excluded.completed_at else weekly_reviews.completed_at end,updated_at=current_timestamp`).run(season.id,range.startDate,range.endDate,reflection.proudOf,reflection.gotInWay,reflection.lesson,reflection.nextPrimaryFocus,reflection.nextSecondaryFocus,now);
+}
+
+const clampDate = (value: string, start: string, end: string) => value < start ? start : value > end ? end : value;
+const metricLabels: Record<MetricKey, string> = { bible_days: "Bible reading days", gym_sessions: "Fitness sessions", dsa_problems: "DSA problems", deep_work_minutes: "Deep work", tutoring_revenue: "Tutoring revenue", savings: "Savings", custom: "Custom" };
+const reviewMetricKeys: MetricKey[] = ["bible_days", "gym_sessions", "dsa_problems", "deep_work_minutes", "tutoring_revenue", "savings"];
+
+function findSeason(seasonId: number): Season | undefined {
+ return db().prepare("select * from seasons where id=?").get(seasonId) as Season | undefined;
+}
+
+function savedSeasonReflection(seasonId: number): SeasonReflection | undefined {
+ const row = db().prepare("select proud_of,changed_most,obstacles,lesson,carry_forward,leave_behind,completed_at from season_reviews where season_id=?").get(seasonId) as Record<string, unknown> | undefined;
+ if (!row) return undefined;
+ return { proudOf: String(row.proud_of ?? ""), changedMost: String(row.changed_most ?? ""), obstacles: String(row.obstacles ?? ""), lesson: String(row.lesson ?? ""), carryForward: String(row.carry_forward ?? ""), leaveBehind: String(row.leave_behind ?? ""), completedAt: row.completed_at ? String(row.completed_at) : null };
+}
+
+function reviewState(season: Season, reflection: SeasonReflection | undefined, today = localDate()): "in_progress" | "reviewed" | "not_reviewed" {
+ if (reflection?.completedAt) return "reviewed";
+ return season.start_date <= today && today <= season.end_date ? "in_progress" : "not_reviewed";
+}
+
+/** Reads only dated evidence and append-only goal history so an old season is never calculated from today's values. */
+export function seasonReview(seasonId?: number, asOfDate = localDate()): SeasonReview {
+ const season = seasonId === undefined ? getActiveSeason(asOfDate) : findSeason(seasonId);
+ if (!season?.id) throw new Error("Season not found.");
+ if (asOfDate < season.start_date) throw new Error("Season review cannot be calculated before the season begins.");
+ const endDate = clampDate(asOfDate, season.start_date, season.end_date);
+ const startSnapshot = trajectorySnapshotFor(season, season.start_date);
+ const endSnapshot = trajectorySnapshotFor(season, endDate);
+ const goals = endSnapshot.goals.map((end) => {
+   const start = startSnapshot.goals.find((item) => item.id === end.id) ?? end;
+   const events = end.tracking_mode === "derived" && end.metric_key ? getMetricEventsAsOf(db(), end.metric_key, season, endDate) : db().prepare("select effective_date as date from goal_updates where goal_id=? and effective_date between ? and ?").all(end.id, season.start_date, endDate) as Array<{ date: string }>;
+   // Textual goal evidence does not determine progress, but belongs in the factual record when it was created during this season.
+   const notes = db().prepare("select substr(created_at,1,10) as date from goal_evidence where goal_id=? and substr(created_at,1,10) between ? and ?").all(end.id, season.start_date, endDate) as Array<{ date: string }>;
+   const evidence = [...events, ...notes];
+   return { id: end.id, area: end.area, title: end.title, target: Number(end.target), startValue: Number(start.current), endValue: Number(end.current), startPercentage: Number(start.actualPercentage), endPercentage: Number(end.actualPercentage), movement: Number(end.actualPercentage - start.actualPercentage), expectedEndPercentage: Number(end.expectedPercentage), trajectoryStatus: end.trajectoryStatus, evidence: { records: evidence.length, activeDays: new Set(evidence.map((event) => event.date)).size } };
+ });
+ const weeks = getSeasonWeekRanges({ startDate: season.start_date, endDate });
+ const totals = getMetricTotalsInRange(db(), season.start_date, endDate);
+ const reflection = savedSeasonReflection(season.id);
+ const weeklyReviews = db().prepare("select week_start,week_end,next_primary_focus,got_in_way,lesson,completed_at from weekly_reviews where season_id=? and completed_at is not null order by week_start").all(season.id) as Array<Record<string, unknown>>;
+ return calculateSeasonReview({
+   season: { id: season.id, name: season.name, theme: season.theme, startDate: season.start_date, endDate: season.end_date, totalDays: calculateSeasonProgress(season, season.end_date).totalDays },
+   state: reviewState(season, reflection),
+   startScore: startSnapshot.score,
+   endScore: endSnapshot.score,
+   expectedEndScore: endSnapshot.expected,
+   goals,
+   metrics: reviewMetricKeys.map((key) => ({ key, label: metricLabels[key], total: totals[key] })),
+   attention: getDeepWorkAttentionInRange(db(), season.start_date, endDate),
+   weeklyTrend: weeks.map((week, index) => ({ ...week, label: week.endDate === endDate ? "Final" : week.label, score: trajectorySnapshotFor(season, week.endDate).score })),
+   consistency: reviewMetricKeys.map((key) => ({ key, label: metricLabels[key], weeks: weeks.map((week) => ({ label: week.endDate === endDate ? "Final" : week.label, value: getMetricTotalsInRange(db(), week.startDate, week.endDate)[key] })) })).filter((summary) => summary.weeks.some((week) => week.value > 0)),
+   milestones: (db().prepare("select id,area,title,achieved_at from milestones where achieved_at between ? and ? order by achieved_at,id").all(season.start_date, endDate) as Array<{ id: number; area: string; title: string; achieved_at: string }>).map((item) => ({ id: item.id, area: item.area, title: item.title, achievedAt: item.achieved_at })),
+   journalHighlights: (db().prepare("select id,content,entry_date from journal where entry_date between ? and ? order by entry_date,id limit 3").all(season.start_date, endDate) as Array<{ id: number; content: string; entry_date: string }>).map((item) => ({ id: item.id, content: item.content, entryDate: item.entry_date })),
+   weeklyReviews: weeklyReviews.map((item): WeeklyReviewSummary => ({ weekStart: String(item.week_start), weekEnd: String(item.week_end), primaryFocus: String(item.next_primary_focus ?? ""), obstacles: String(item.got_in_way ?? ""), lesson: String(item.lesson ?? ""), completedAt: item.completed_at ? String(item.completed_at) : null })),
+   reflection,
+ });
+}
+
+export function seasonReviewNavigation(today = localDate()) {
+ return (listSeasons() as Season[]).sort((left, right) => left.start_date.localeCompare(right.start_date)).map((season) => {
+   const reflection = season.id ? savedSeasonReflection(season.id) : undefined;
+   return { id: season.id, name: season.name, startDate: season.start_date, endDate: season.end_date, state: reviewState(season, reflection, today) };
+ });
+}
+
+export function saveSeasonReview(seasonId: number, reflection: Omit<SeasonReflection, "completedAt">, complete: boolean) {
+ const season = findSeason(seasonId);
+ if (!season?.id) throw new Error("Season not found.");
+ const completedAt = complete ? new Date().toISOString() : null;
+ return db().prepare(`insert into season_reviews(season_id,proud_of,changed_most,obstacles,lesson,carry_forward,leave_behind,completed_at,updated_at)
+ values(?,?,?,?,?,?,?,?,current_timestamp)
+ on conflict(season_id) do update set proud_of=excluded.proud_of,changed_most=excluded.changed_most,obstacles=excluded.obstacles,lesson=excluded.lesson,carry_forward=excluded.carry_forward,leave_behind=excluded.leave_behind,completed_at=case when excluded.completed_at is not null then excluded.completed_at else season_reviews.completed_at end,updated_at=current_timestamp`).run(season.id, reflection.proudOf, reflection.changedMost, reflection.obstacles, reflection.lesson, reflection.carryForward, reflection.leaveBehind, completedAt);
 }

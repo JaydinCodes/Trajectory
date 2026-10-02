@@ -8,6 +8,7 @@ const nav = [
   { href: "/", icon: Home, label: "Today" }, { href: "/trajectory", icon: ChartNoAxesCombined, label: "Trajectory" },
   { href: "/areas", icon: Sparkles, label: "Areas" }, { href: "/journal", icon: BookOpen, label: "Journal" },
   { href: "/insights", icon: Lightbulb, label: "Insights" }, { href: "/review", icon: BriefcaseBusiness, label: "Review" },
+  { href: "/review/season", icon: ChartNoAxesCombined, label: "Season Review" },
 ];
 
 export function AppChrome({ children }: { children: React.ReactNode }) {

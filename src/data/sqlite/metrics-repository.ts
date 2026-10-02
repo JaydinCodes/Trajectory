@@ -2,6 +2,7 @@ import type { MetricKey, Season } from "../../lib/trajectory/types";
 import type { SqliteDatabase } from "./types";
 
 export type MetricEvent = { id: number; source: string; date: string; kind: "activity" | "measurement"; value: number; label: string; note: string | null };
+export type AttentionEvent = { name: string; minutes: number };
 export type MetricDateRange = Pick<Season, "start_date" | "end_date">;
 const range = (season: MetricDateRange) => [season.start_date, season.end_date];
 
@@ -58,6 +59,11 @@ export function getMetricTotals(database: SqliteDatabase, season: Season): Recor
 /** Weekly reporting uses the exact requested range while preserving metric aggregation semantics. */
 export function getMetricTotalsInRange(database: SqliteDatabase, startDate: string, endDate: string): Record<MetricKey, number> {
   return totalsFor((metric) => getMetricEvents(database, metric, { start_date: startDate, end_date: endDate }));
+}
+
+/** The same persisted deep-work source used by the deep-work metric, grouped only for retrospective attention reporting. */
+export function getDeepWorkAttentionInRange(database: SqliteDatabase, startDate: string, endDate: string): AttentionEvent[] {
+  return database.prepare("select coalesce(nullif(project,''), nullif(area,''), 'Unassigned') as name, coalesce(sum(amount),0) as minutes from entries where metric_key='deep_work_minutes' and entry_date between ? and ? group by coalesce(nullif(project,''), nullif(area,''), 'Unassigned')").all(startDate, endDate) as AttentionEvent[];
 }
 
 /** Totals used by live trajectory calculations. Future evidence is never included. */

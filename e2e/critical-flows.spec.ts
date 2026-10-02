@@ -45,3 +45,31 @@ test("manual goals resolve their value at the requested historical date", async 
   expect(firstSnapshot.find((item) => item.title === title)?.current).toBe(20);
   expect(secondSnapshot.find((item) => item.title === title)?.current).toBe(50);
 });
+test("season review derives dated evidence and persists a completed reflection", async ({ page }) => {
+  const today = await page.evaluate(() => new Intl.DateTimeFormat("en-CA", { timeZone: "Africa/Johannesburg", year: "numeric", month: "2-digit", day: "2-digit" }).formatToParts(new Date()).reduce<Record<string, string>>((all, part) => ({ ...all, [part.type]: part.value }), {}));
+  const todayDate = `${today.year}-${today.month}-${today.day}`;
+  // Keep the evidence range well away from the shared current-season test data.
+  const offset = 1_000 + (Date.now() % 10_000);
+  const startDate = shiftDate(todayDate, -offset);
+  const endDate = shiftDate(startDate, 13);
+  const name = `Season review ${Date.now()}`;
+  await page.request.post("/api/seasons", { data: { name, theme: "Evidence", startDate, endDate } });
+  const seasons = await (await page.request.get("/api/seasons")).json() as { seasons: Array<{ id: number; name: string }> };
+  const season = seasons.seasons.find((item) => item.name === name);
+  expect(season).toBeDefined();
+  const title = `Season DSA ${Date.now()}`;
+  await page.request.post("/api/goals", { data: { area: "Coding", title, target: 10, goalType: "count", weight: 1, trackingMode: "derived", metricKey: "dsa_problems", seasonId: season?.id, deadline: endDate } });
+  await page.request.post("/api/records/coding", { data: { problems: 3, category: "Season review", date: startDate } });
+  await page.request.post("/api/records/coding", { data: { problems: 4, category: "Season review", date: endDate } });
+  await page.request.post("/api/entries", { data: { type: "Deep work", detail: "Season review work", amount: 90, date: endDate, area: "Coding", metricKey: "deep_work_minutes" } });
+  await page.goto(`/review/season?seasonId=${season?.id}`);
+  await expect(page.getByRole("heading", { name, exact: true })).toBeVisible();
+  await expect(page.getByText(title)).toBeVisible();
+  await expect(page.getByText("7 / 10")).toBeVisible();
+  await expect(page.getByText("1h 30m").first()).toBeVisible();
+  await page.getByLabel(/what am i proud/i).fill("I kept a dated record.");
+  await page.getByRole("button", { name: "Complete Season Review" }).click();
+  await expect(page.getByRole("button", { name: "Season review complete" })).toBeDisabled();
+  await page.reload();
+  await expect(page.getByLabel(/what am i proud/i)).toHaveValue("I kept a dated record.");
+});
