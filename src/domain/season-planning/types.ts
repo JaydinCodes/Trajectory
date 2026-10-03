@@ -24,6 +24,8 @@ export type PlannedGoalInput = {
   importance: GoalImportance;
   baselineValue?: number;
   carriedFromGoalId?: number | null;
+  directionId?: number | null;
+  horizonId?: number | null;
 };
 
 export type CarryForwardLesson = { kind: "carry_forward" | "leave_behind" | "lesson"; content: string };

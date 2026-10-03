@@ -19,6 +19,8 @@ import { nextCalendarMonth } from "@/domain/season-planning/planning";
 import type { SeasonPlanInput, UnfinishedGoal } from "@/domain/season-planning/types";
 import type { AreaHistoryItem, GoalJourneyItem, HistoricalDate, HistoryMetric, SeasonComparison, SeasonTimelineItem } from "@/domain/history/types";
 import { createLifeTimeline, createSeasonComparison } from "@/services/history-service";
+import { currentHorizon, resolveHistoricalDirection } from "@/services/direction-service";
+import type { DirectionOverview, DirectionStatus, DirectionVersion, Horizon, HorizonType, LifeDirection } from "@/domain/direction/types";
 const nodeSqlite: { DatabaseSync: new (filename:string) => SqliteDatabase } = require("node:sqlite");
 
 const dataDir = path.join(process.cwd(), "data");
@@ -59,12 +61,18 @@ function db() {
     create table if not exists season_reviews (id integer primary key, season_id integer not null references seasons(id) on delete cascade, proud_of text not null default '', changed_most text not null default '', obstacles text not null default '', lesson text not null default '', carry_forward text not null default '', leave_behind text not null default '', completed_at text, created_at text not null default current_timestamp, updated_at text not null default current_timestamp, unique(season_id));
     create table if not exists season_area_plans (id integer primary key, season_id integer not null references seasons(id) on delete cascade, area text not null, outcome text not null default '', priority real not null default 1, created_at text not null default current_timestamp, unique(season_id,area));
     create table if not exists season_planning_lessons (id integer primary key, season_id integer not null references seasons(id) on delete cascade, kind text not null check(kind in ('carry_forward','leave_behind','lesson')), content text not null, created_at text not null default current_timestamp);
+    create table if not exists life_directions (id integer primary key, area text not null, statement text not null, why text, status text not null default 'active' check(status in ('active','archived','paused')), created_at text not null default current_timestamp, updated_at text not null default current_timestamp);
+    create table if not exists direction_versions (id integer primary key, direction_id integer not null references life_directions(id) on delete cascade, statement text not null, why text, effective_from text not null, effective_to text, created_at text not null default current_timestamp);
+    create table if not exists horizons (id integer primary key, direction_id integer not null references life_directions(id) on delete cascade, name text not null, horizon_type text not null check(horizon_type in ('quarter','year','custom')), start_date text, end_date text, statement text not null, status text not null default 'active' check(status in ('active','archived','paused')), created_at text not null default current_timestamp, updated_at text not null default current_timestamp);
+    create table if not exists horizon_outcomes (id integer primary key, horizon_id integer not null references horizons(id) on delete cascade, statement text not null, position integer not null default 0);
   `);
   addColumn(database, "goals", "metric_key text");
   addColumn(database, "goals", "tracking_mode text not null default 'manual'");
   addColumn(database, "goals", "season_id integer");
   addColumn(database, "goals", "baseline_value real not null default 0");
   addColumn(database, "goals", "carried_from_goal_id integer");
+  addColumn(database, "goals", "direction_id integer");
+  addColumn(database, "goals", "horizon_id integer");
   addColumn(database, "seasons", "status text not null default 'draft'");
   addColumn(database, "seasons", "updated_at text");
   addColumn(database, "seasons", "intention text");
@@ -87,6 +95,10 @@ function db() {
   database.exec("create index if not exists season_reviews_season_idx on season_reviews(season_id)");
   database.exec("create index if not exists seasons_status_range_idx on seasons(status,start_date,end_date)");
   database.exec("create index if not exists goals_carried_from_idx on goals(carried_from_goal_id)");
+  database.exec("create index if not exists goals_direction_idx on goals(direction_id)");
+  database.exec("create index if not exists goals_horizon_idx on goals(horizon_id)");
+  database.exec("create index if not exists direction_versions_lookup_idx on direction_versions(direction_id,effective_from,effective_to)");
+  database.exec("create index if not exists horizons_direction_range_idx on horizons(direction_id,start_date,end_date)");
   // Data created before lifecycle support was implicitly current when its dates contained today.
   // Record completion so a newly saved current-date draft is never auto-activated on restart.
   const lifecycleBackfill = database.prepare("select value from settings where key='season_lifecycle_backfill_v1'").get();
@@ -157,6 +169,95 @@ export function createSeason(name:string,theme:string,startDate:string,endDate:s
 export function createSeasonPlan(plan: SeasonPlanInput) { return createDraftSeason(db(), plan); }
 export function updateSeasonPlan(seasonId: number, plan: SeasonPlanInput) { return updateDraftSeason(db(), seasonId, plan); }
 export function activateSeasonPlan(seasonId: number) { return activateDraftSeason(db(), seasonId); }
+
+type DirectionInput = { area: string; statement: string; why?: string | null; effectiveFrom: string };
+type HorizonInput = { name: string; horizonType: HorizonType; startDate?: string | null; endDate?: string | null; statement: string; outcomes: string[] };
+const directionStatus = (value: unknown): DirectionStatus => value === "archived" || value === "paused" ? value : "active";
+const directionRow = (row: Record<string, unknown>): LifeDirection => ({ id: Number(row.id), area: String(row.area), statement: String(row.statement), why: row.why === null ? null : String(row.why ?? "") || null, status: directionStatus(row.status), createdAt: String(row.created_at), updatedAt: String(row.updated_at) });
+const directionVersionRow = (row: Record<string, unknown>): DirectionVersion => ({ id: Number(row.id), directionId: Number(row.direction_id), statement: String(row.statement), why: row.why === null ? null : String(row.why ?? "") || null, effectiveFrom: String(row.effective_from), effectiveTo: row.effective_to === null ? null : String(row.effective_to ?? "") || null, createdAt: String(row.created_at) });
+const previousDate = (value: string) => { const date = new Date(`${value}T12:00:00Z`); date.setUTCDate(date.getUTCDate() - 1); return date.toISOString().slice(0, 10); };
+
+export function listDirectionVersions(directionId: number): DirectionVersion[] {
+ return (db().prepare("select * from direction_versions where direction_id=? order by effective_from,id").all(directionId) as Array<Record<string, unknown>>).map(directionVersionRow);
+}
+
+export function listDirections(status?: DirectionStatus): LifeDirection[] {
+ const rows = status === undefined ? db().prepare("select * from life_directions order by case status when 'active' then 0 when 'paused' then 1 else 2 end,area").all() : db().prepare("select * from life_directions where status=? order by area").all(status);
+ return (rows as Array<Record<string, unknown>>).map(directionRow);
+}
+
+export function createDirection(input: DirectionInput) {
+ const store = db();
+ if (store.prepare("select id from life_directions where lower(area)=lower(?) and status='active'").get(input.area)) throw new Error("This life area already has an active direction.");
+ store.exec("begin immediate");
+ try {
+   store.prepare("insert into life_directions(area,statement,why,status,updated_at) values(?,?,?,'active',current_timestamp)").run(input.area.trim(), input.statement.trim(), input.why?.trim() || null);
+   const id = Number((store.prepare("select last_insert_rowid() as id").get() as { id: number }).id);
+   store.prepare("insert into direction_versions(direction_id,statement,why,effective_from) values(?,?,?,?)").run(id, input.statement.trim(), input.why?.trim() || null, input.effectiveFrom);
+   store.exec("commit"); return id;
+ } catch (error) { store.exec("rollback"); throw error; }
+}
+
+export function updateDirection(directionId: number, input: DirectionInput) {
+ const store = db(); const direction = store.prepare("select * from life_directions where id=?").get(directionId) as Record<string, unknown> | undefined;
+ if (!direction) throw new Error("Direction not found.");
+ const latest = store.prepare("select * from direction_versions where direction_id=? order by effective_from desc,id desc limit 1").get(directionId) as Record<string, unknown> | undefined;
+ store.exec("begin immediate");
+ try {
+   store.prepare("update life_directions set area=?,statement=?,why=?,updated_at=current_timestamp where id=?").run(input.area.trim(), input.statement.trim(), input.why?.trim() || null, directionId);
+   if (!latest || String(latest.statement) !== input.statement.trim() || String(latest.why ?? "") !== (input.why?.trim() ?? "")) {
+     if (latest && String(latest.effective_from) < input.effectiveFrom) {
+       store.prepare("update direction_versions set effective_to=? where id=?").run(previousDate(input.effectiveFrom), latest.id);
+       store.prepare("insert into direction_versions(direction_id,statement,why,effective_from) values(?,?,?,?)").run(directionId, input.statement.trim(), input.why?.trim() || null, input.effectiveFrom);
+     } else if (latest) {
+       // A correction taking effect the same day replaces the unobserved current version.
+       store.prepare("update direction_versions set statement=?,why=? where id=?").run(input.statement.trim(), input.why?.trim() || null, latest.id);
+     }
+   }
+   store.exec("commit");
+ } catch (error) { store.exec("rollback"); throw error; }
+}
+
+export function setDirectionStatus(directionId: number, status: DirectionStatus) {
+ const result = db().prepare("update life_directions set status=?,updated_at=current_timestamp where id=?").run(status, directionId) as { changes?: number };
+ if (!result.changes) throw new Error("Direction not found.");
+}
+
+export function listHorizons(directionId: number): Horizon[] {
+ const store = db(); const horizons = store.prepare("select * from horizons where direction_id=? order by coalesce(start_date,'9999-12-31'),id").all(directionId) as Array<Record<string, unknown>>;
+ return horizons.map((row) => ({ id: Number(row.id), directionId: Number(row.direction_id), name: String(row.name), horizonType: row.horizon_type as HorizonType, startDate: row.start_date === null ? null : String(row.start_date ?? "") || null, endDate: row.end_date === null ? null : String(row.end_date ?? "") || null, statement: String(row.statement), status: directionStatus(row.status), outcomes: (store.prepare("select * from horizon_outcomes where horizon_id=? order by position,id").all(row.id) as Array<Record<string, unknown>>).map((outcome) => ({ id: Number(outcome.id), horizonId: Number(outcome.horizon_id), statement: String(outcome.statement), position: Number(outcome.position) })) }));
+}
+
+export function createHorizon(directionId: number, input: HorizonInput) {
+ const store = db(); if (!store.prepare("select id from life_directions where id=?").get(directionId)) throw new Error("Direction not found.");
+ store.exec("begin immediate");
+ try {
+   store.prepare("insert into horizons(direction_id,name,horizon_type,start_date,end_date,statement,status,updated_at) values(?,?,?,?,?,?,'active',current_timestamp)").run(directionId, input.name.trim(), input.horizonType, input.startDate ?? null, input.endDate ?? null, input.statement.trim());
+   const id = Number((store.prepare("select last_insert_rowid() as id").get() as { id: number }).id);
+   input.outcomes.filter(Boolean).forEach((outcome, position) => store.prepare("insert into horizon_outcomes(horizon_id,statement,position) values(?,?,?)").run(id, outcome.trim(), position));
+   store.exec("commit"); return id;
+ } catch (error) { store.exec("rollback"); throw error; }
+}
+
+export function directionForDate(directionId: number, value: string) { return resolveHistoricalDirection(listDirectionVersions(directionId), value); }
+
+export function directionOverview(today = localDate()): DirectionOverview {
+ const store = db(); const directions = listDirections(); const activeSeason = store.prepare("select * from seasons where status='active' and start_date<=? and end_date>=? order by start_date desc limit 1").get(today, today) as Season | undefined;
+ const defaultAreas = ["Faith", "Fitness", "Odysseus", "Ledgerly", "Career", "Coding", "Finance", "Personal"];
+ const areas = [...new Set([...defaultAreas, ...(store.prepare("select distinct area from goals").all() as Array<{ area: string }>).map((row) => row.area)])].sort();
+ const connected = activeSeason ? store.prepare("select d.id as direction_id,d.area,count(g.id) as goal_count from life_directions d join goals g on g.direction_id=d.id where g.season_id=? group by d.id,d.area order by d.area").all(activeSeason.id) as Array<{ direction_id: number; area: string; goal_count: number }> : [];
+ const standalone = activeSeason ? store.prepare("select id,title,area from goals where season_id=? and direction_id is null order by area,title").all(activeSeason.id) as Array<{ id: number; title: string; area: string }> : [];
+ return {
+   directions: directions.map((direction) => {
+     const horizons = listHorizons(direction.id); const goals = activeSeason ? store.prepare("select id,title from goals where season_id=? and direction_id=? order by id").all(activeSeason.id, direction.id) as Array<{ id: number; title: string }> : [];
+     const pastSeasonsWithoutLink = store.prepare("select count(*) as count from seasons s where s.status='completed' and exists(select 1 from goals g where g.season_id=s.id and lower(g.area)=lower(?)) and not exists(select 1 from goals g where g.season_id=s.id and g.direction_id=?)").get(direction.area, direction.id) as { count: number };
+     return { ...direction, horizons, currentHorizon: currentHorizon(horizons, today), currentSeason: activeSeason && goals.length ? { id: activeSeason.id!, name: activeSeason.name, goals } : undefined, linkedGoalCount: Number((store.prepare("select count(*) as count from goals where direction_id=?").get(direction.id) as { count: number }).count), inactiveSeasonCount: pastSeasonsWithoutLink.count };
+   }),
+   coverage: areas.map((area) => { const direction = directions.find((item) => item.area.toLowerCase() === area.toLowerCase() && item.status === "active"); return { area, directionId: direction?.id ?? null, status: direction ? "defined" : "none" }; }),
+   alignment: { totalGoals: activeSeason ? Number((store.prepare("select count(*) as count from goals where season_id=?").get(activeSeason.id) as { count: number }).count) : 0, connected: connected.map((item) => ({ directionId: item.direction_id, area: item.area, goalCount: item.goal_count })), standalone },
+ };
+}
+
 export function seasonPlanningContext(previousSeasonId?: number) {
  const store = db();
  const previous = previousSeasonId === undefined
@@ -171,7 +272,7 @@ export function seasonPlanningContext(previousSeasonId?: number) {
    return { id: Number(goal.id), area: String(goal.area), title: String(goal.title), target: Number(goal.target), current: raw, trackingMode: goal.tracking_mode as UnfinishedGoal["trackingMode"], metricKey: goal.metric_key as UnfinishedGoal["metricKey"], goalType: goal.goal_type as UnfinishedGoal["goalType"] };
  }).filter((goal) => goal.current < goal.target) : [];
  const recommendedAreas = previous?.id ? (store.prepare("select distinct area from goals where season_id=? order by area").all(previous.id) as Array<{ area: string }>).map((item) => item.area) : [];
- return { defaults, previous: previous ? { id: previous.id, name: previous.name, startDate: previous.start_date, endDate: previous.end_date, reflection, unfinished } : null, areas: [...areas], recommendedAreas };
+ return { defaults, previous: previous ? { id: previous.id, name: previous.name, startDate: previous.start_date, endDate: previous.end_date, reflection, unfinished } : null, areas: [...areas], recommendedAreas, directions: listDirections("active").map((direction) => ({ ...direction, horizons: listHorizons(direction.id).filter((horizon) => horizon.status === "active") })) };
 }
 /** Current values always stop at the requested local date. */
 export function metricTotals(season:Season, asOfDate=localDate()): Record<MetricKey,number> { return getMetricTotalsAsOf(db(),season,asOfDate); }
@@ -185,7 +286,10 @@ function trajectorySnapshotFor(season: Season, asOfDate: string) {
 }
 export function goalsWithProgress(today=localDate()) {
  const season=getActiveSeason(today); const snapshot=trajectorySnapshotFor(season,today);
- return snapshot.goals;
+ return snapshot.goals.map((goal) => {
+   const direction = goal.direction_id ? directionForDate(goal.direction_id, season.start_date) : undefined;
+   return { ...goal, direction: direction ? { statement: direction.statement } : undefined };
+ });
 }
 export function areaMomentum(area:string,today=localDate()) { const season=getActiveSeason(today); return trajectorySnapshotFor(season,today).areas.find((item)=>item.area===area)?.momentum??"insufficient_data"; }
 export function insights(today=localDate()){const store=db();const season=getActiveSeason(today);const dateRange=metricRangeAsOf(season,today);const byType=dateRange?store.prepare("select type, count(*) as count, coalesce(sum(amount),0) as total from entries where entry_date between ? and ? group by type").all(dateRange.start_date,dateRange.end_date) as Array<{type:string;count:number;total:number}>:[];const metrics=metricTotals(season,today);return {byType,bibleDays:metrics.bible_days,gymSessions:metrics.gym_sessions,codingProblems:metrics.dsa_problems,deepWorkMinutes:metrics.deep_work_minutes,tutoringRevenue:metrics.tutoring_revenue};}
@@ -200,7 +304,10 @@ export function searchEverything(term:string){const q=`%${term.trim()}%`;if(!ter
  ...store.prepare("select 'milestone' as kind,id,title,achieved_at as date from milestones where title like ?").all(q),
  ...store.prepare("select 'entry' as kind,id,detail as title,entry_date as date from entries where detail like ?").all(q),
  ...store.prepare("select 'weekly review' as kind,id,coalesce(next_primary_focus,lesson,got_in_way) as title,week_start as date from weekly_reviews where next_primary_focus like ? or lesson like ? or got_in_way like ?").all(q,q,q),
- ...store.prepare("select 'season review' as kind,r.id,coalesce(r.lesson,r.carry_forward,r.leave_behind) as title,s.end_date as date from season_reviews r join seasons s on s.id=r.season_id where r.lesson like ? or r.carry_forward like ? or r.leave_behind like ?").all(q,q,q)
+ ...store.prepare("select 'season review' as kind,r.id,coalesce(r.lesson,r.carry_forward,r.leave_behind) as title,s.end_date as date from season_reviews r join seasons s on s.id=r.season_id where r.lesson like ? or r.carry_forward like ? or r.leave_behind like ?").all(q,q,q),
+ ...store.prepare("select 'life direction' as kind,id,statement as title,created_at as date from life_directions where statement like ? or area like ? or coalesce(why,'') like ?").all(q,q,q),
+ ...store.prepare("select 'horizon' as kind,h.id,coalesce(d.area || ': ','') || h.statement as title,coalesce(h.start_date,h.created_at) as date from horizons h join life_directions d on d.id=h.direction_id where h.name like ? or h.statement like ? or d.area like ?").all(q,q,q),
+ ...store.prepare("select 'horizon outcome' as kind,o.id,o.statement as title,coalesce(h.start_date,h.created_at) as date from horizon_outcomes o join horizons h on h.id=o.horizon_id where o.statement like ?").all(q)
  ];}
 export function activityDays(){return db().prepare("select entry_date as date,count(*) as count from (select entry_date from entries union all select entry_date from bible_entries union all select entry_date from workouts union all select entry_date from coding_entries union all select entry_date from journal) group by entry_date order by entry_date").all();}
 export function activityDaysFor(metric:string){const sql:Record<string,string>={Bible:"select entry_date as date,count(*) as count from bible_entries group by entry_date",Gym:"select entry_date as date,count(*) as count from workouts group by entry_date",Coding:"select entry_date as date,sum(problems) as count from coding_entries group by entry_date",Journal:"select entry_date as date,count(*) as count from journal group by entry_date",Overall:"select entry_date as date,count(*) as count from (select entry_date from entries union all select entry_date from bible_entries union all select entry_date from workouts union all select entry_date from coding_entries union all select entry_date from journal) group by entry_date"};return db().prepare(sql[metric]??sql.Overall).all();}
@@ -218,7 +325,7 @@ export function fullSeasonGoalEvidence(goalId:number,today=localDate()) {
  const manual=(listEvidence(goalId) as Array<Record<string,unknown>>).map(item=>({...item,source:"manual"})); if(goal.tracking_mode!=="derived" || !goal.metric_key) return manual;
  return [...getFullSeasonMetricEvents(store,goal.metric_key,season).map(item=>({...item,value:item.label,source:"derived"})),...manual];
 }
-export function exportData(){const store=db();const tables=["entries","journal","reviews","goals","goal_evidence","financial_entries","milestones","bible_entries","workouts","workout_exercises","coding_entries","daily_pulse","settings"];return Object.fromEntries(tables.map(table=>[table,store.prepare(`select * from ${table}`).all()]));}
+export function exportData(){const store=db();const tables=["entries","journal","reviews","goals","goal_evidence","financial_entries","milestones","bible_entries","workouts","workout_exercises","coding_entries","daily_pulse","settings","life_directions","direction_versions","horizons","horizon_outcomes"];return Object.fromEntries(tables.map(table=>[table,store.prepare(`select * from ${table}`).all()]));}
 export function reviewSummary(){const d=insights();const priority=d.deepWorkMinutes<480?"Schedule one protected Ledgerly block before the week fills up.":"Protect the routines that are already generating evidence.";return {summary:`This week contains ${d.bibleDays} Scripture records, ${d.gymSessions} training sessions, and ${d.codingProblems} coding problems.`,priority};}
 export function correlations(){const store=db();const trained=store.prepare("select avg(p.mood) as average from daily_pulse p where exists(select 1 from workouts w where w.entry_date=p.entry_date)").get() as {average:number|null};const rest=store.prepare("select avg(p.mood) as average from daily_pulse p where not exists(select 1 from workouts w where w.entry_date=p.entry_date)").get() as {average:number|null};return {gymMood:trained.average===null||rest.average===null?null:{trained:Math.round(trained.average*10)/10,rest:Math.round(rest.average*10)/10}}}
 export function comparison(){const previous=db().prepare("select * from season_snapshots order by id desc limit 1").get() as Record<string,unknown>|undefined;const current=insights();return {previous,current:{month:monthName(),bible_days:current.bibleDays,gym_sessions:current.gymSessions,coding_problems:current.codingProblems,deep_work_minutes:current.deepWorkMinutes}}}
@@ -234,13 +341,17 @@ const historyMetricKeys: MetricKey[] = ["bible_days", "gym_sessions", "dsa_probl
 const historyStatus = (season: Season): "draft" | "active" | "completed" => season.status === "active" || season.status === "completed" ? season.status : "draft";
 const historyAsOf = (season: Season, today = localDate()) => historyStatus(season) === "active" ? (today < season.end_date ? today : season.end_date) : season.end_date;
 const historyMetrics = (totals: Record<MetricKey, number>): HistoryMetric[] => historyMetricKeys.map((key) => ({ key, label: historyMetricLabels[key], total: totals[key] }));
+function directionsForSeason(seasonId: number, atDate: string) {
+ const rows = db().prepare("select distinct d.id,d.area from life_directions d join goals g on g.direction_id=d.id where g.season_id=? and g.direction_id is not null order by d.area").all(seasonId) as Array<{ id: number; area: string }>;
+ return rows.flatMap((row) => { const version = directionForDate(row.id, atDate); return version ? [{ id: row.id, area: row.area, statement: version.statement }] : []; });
+}
 
 function historySeasonItem(season: Season, today = localDate()): SeasonTimelineItem {
  const store = db(); const status = historyStatus(season);
- if (status === "draft" || today < season.start_date) return { season: { id: season.id!, name: season.name, theme: season.theme, intention: season.intention ?? null, startDate: season.start_date, endDate: season.end_date }, status, trajectory: { start: 0, end: 0, change: 0 }, goals: { total: Number((store.prepare("select count(*) as count from goals where season_id=?").get(season.id) as { count: number }).count), completed: 0, carriedForward: 0 }, metrics: historyMetrics({ bible_days: 0, gym_sessions: 0, dsa_problems: 0, deep_work_minutes: 0, tutoring_revenue: 0, savings: 0, custom: 0 }), milestones: [], dominantAttention: [] };
+ if (status === "draft" || today < season.start_date) return { season: { id: season.id!, name: season.name, theme: season.theme, intention: season.intention ?? null, startDate: season.start_date, endDate: season.end_date }, status, trajectory: { start: 0, end: 0, change: 0 }, goals: { total: Number((store.prepare("select count(*) as count from goals where season_id=?").get(season.id) as { count: number }).count), completed: 0, carriedForward: 0 }, metrics: historyMetrics({ bible_days: 0, gym_sessions: 0, dsa_problems: 0, deep_work_minutes: 0, tutoring_revenue: 0, savings: 0, custom: 0 }), milestones: [], directions: directionsForSeason(season.id!, season.start_date), dominantAttention: [] };
  const asOf = historyAsOf(season, today); const review = seasonReview(season.id, asOf); const next = store.prepare("select id,name,theme from seasons where previous_season_id=? order by start_date limit 1").get(season.id) as { id: number; name: string; theme: string } | undefined;
  const carriedForward = Number((store.prepare("select count(*) as count from goals where carried_from_goal_id in (select id from goals where season_id=?)").get(season.id) as { count: number }).count);
- return { season: { id: season.id!, name: season.name, theme: season.theme, intention: season.intention ?? null, startDate: season.start_date, endDate: season.end_date }, status, trajectory: { start: review.trajectory.startScore, end: review.trajectory.endScore, change: review.trajectory.change }, goals: { total: review.goals.all.length, completed: review.goals.completed.length, carriedForward }, metrics: review.metrics, milestones: review.milestones, review: review.reflection?.completedAt ? { lesson: review.reflection.lesson, carryForward: review.reflection.carryForward, leaveBehind: review.reflection.leaveBehind, completedAt: review.reflection.completedAt } : undefined, dominantAttention: review.attention.slice(0, 3), nextSeason: next };
+ return { season: { id: season.id!, name: season.name, theme: season.theme, intention: season.intention ?? null, startDate: season.start_date, endDate: season.end_date }, status, trajectory: { start: review.trajectory.startScore, end: review.trajectory.endScore, change: review.trajectory.change }, goals: { total: review.goals.all.length, completed: review.goals.completed.length, carriedForward }, metrics: review.metrics, milestones: review.milestones, directions: directionsForSeason(season.id!, season.start_date), review: review.reflection?.completedAt ? { lesson: review.reflection.lesson, carryForward: review.reflection.carryForward, leaveBehind: review.reflection.leaveBehind, completedAt: review.reflection.completedAt } : undefined, dominantAttention: review.attention.slice(0, 3), nextSeason: next };
 }
 
 /** Season-level archive summaries. Each completed season is calculated at its own end date. */
@@ -264,7 +375,7 @@ export function goalJourney(goalId: number, today = localDate()): GoalJourneyIte
 }
 
 export function areaHistory(area: string, today = localDate()): AreaHistoryItem[] {
- const store = db(); return (listSeasons() as Season[]).filter((season) => historyStatus(season) !== "draft").map((season) => { const asOf = historyAsOf(season, today); const goals = (listGoalRecords(store, season.id) as Goal[]).filter((goal) => goal.area.toLowerCase() === area.toLowerCase()); if (!goals.length) return undefined; const metrics = metricTotals(season, asOf); const metricKeys = [...new Set(goals.flatMap((goal) => goal.metric_key ? [goal.metric_key] : []))]; return { seasonId: season.id!, seasonName: season.name, startDate: season.start_date, status: historyStatus(season), goals: goals.map((goal) => { const progress = historyGoalValue(goal, season, asOf); return { id: goal.id, title: goal.title, current: progress.current, target: goal.target, percentage: progress.actualPercentage }; }), metrics: metricKeys.map((key) => ({ key, label: historyMetricLabels[key], total: metrics[key] })), milestones: (store.prepare("select id,area,title,achieved_at from milestones where area=? and achieved_at between ? and ? order by achieved_at").all(area, season.start_date, asOf) as Array<{ id: number; area: string; title: string; achieved_at: string }>).map((milestone) => ({ id: milestone.id, area: milestone.area, title: milestone.title, achievedAt: milestone.achieved_at })) } as AreaHistoryItem | undefined; }).filter((item): item is AreaHistoryItem => Boolean(item)).sort((left, right) => right.startDate.localeCompare(left.startDate));
+ const store = db(); return (listSeasons() as Season[]).filter((season) => historyStatus(season) !== "draft").map((season) => { const asOf = historyAsOf(season, today); const goals = (listGoalRecords(store, season.id) as Goal[]).filter((goal) => goal.area.toLowerCase() === area.toLowerCase()); if (!goals.length) return undefined; const metrics = metricTotals(season, asOf); const metricKeys = [...new Set(goals.flatMap((goal) => goal.metric_key ? [goal.metric_key] : []))]; const linked = directionsForSeason(season.id!, season.start_date).find((direction) => direction.area.toLowerCase() === area.toLowerCase()); return { seasonId: season.id!, seasonName: season.name, startDate: season.start_date, status: historyStatus(season), directionAtTime: linked?.statement, goals: goals.map((goal) => { const progress = historyGoalValue(goal, season, asOf); return { id: goal.id, title: goal.title, current: progress.current, target: goal.target, percentage: progress.actualPercentage }; }), metrics: metricKeys.map((key) => ({ key, label: historyMetricLabels[key], total: metrics[key] })), milestones: (store.prepare("select id,area,title,achieved_at from milestones where area=? and achieved_at between ? and ? order by achieved_at").all(area, season.start_date, asOf) as Array<{ id: number; area: string; title: string; achieved_at: string }>).map((milestone) => ({ id: milestone.id, area: milestone.area, title: milestone.title, achievedAt: milestone.achieved_at })) } as AreaHistoryItem | undefined; }).filter((item): item is AreaHistoryItem => Boolean(item)).sort((left, right) => right.startDate.localeCompare(left.startDate));
 }
 
 function comparisonSummary(seasonId: number, today = localDate()): SeasonComparison["left"] { const item = historySeason(seasonId, today).item; return { id: item.season.id, name: item.season.name, theme: item.season.theme, trajectoryEnd: item.trajectory.end, goalsCompleted: item.goals.completed, areasActive: new Set((listGoalRecords(db(), item.season.id) as Goal[]).map((goal) => goal.area)).size, milestones: item.milestones.length, metrics: item.metrics }; }

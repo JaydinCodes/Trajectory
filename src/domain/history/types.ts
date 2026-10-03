@@ -11,6 +11,7 @@ export type SeasonTimelineItem = {
   goals: { total: number; completed: number; carriedForward: number };
   metrics: HistoryMetric[];
   milestones: HistoryMilestone[];
+  directions?: Array<{ id: number; area: string; statement: string }>;
   review?: { lesson: string; carryForward: string; leaveBehind: string; completedAt: string };
   dominantAttention: Array<{ name: string; minutes: number; percentage: number }>;
   nextSeason?: { id: number; name: string; theme: string };
@@ -32,4 +33,4 @@ export type SeasonComparison = {
 };
 
 export type GoalJourneyItem = { id: number; seasonId: number; seasonName: string; seasonStartDate: string; title: string; area: string; current: number; target: number; percentage: number; status: string };
-export type AreaHistoryItem = { seasonId: number; seasonName: string; startDate: string; status: SeasonStatus; goals: Array<{ id: number; title: string; current: number; target: number; percentage: number }>; metrics: HistoryMetric[]; milestones: HistoryMilestone[] };
+export type AreaHistoryItem = { seasonId: number; seasonName: string; startDate: string; status: SeasonStatus; directionAtTime?: string; goals: Array<{ id: number; title: string; current: number; target: number; percentage: number }>; metrics: HistoryMetric[]; milestones: HistoryMilestone[] };

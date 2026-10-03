@@ -23,14 +23,17 @@ function planFrom(body: Record<string, unknown>): SeasonPlanInput {
     const item = value as Record<string, unknown>;
     const mode = trackingMode(item.trackingMode);
     const metricKey = metric(item.metricKey);
-    return { title: text(item.title, "Goal title"), area: text(item.area, "Goal area"), target: number(item.target, "Goal target", { positive: true }), goalType: goalType(item.goalType), trackingMode: mode, metricKey, deadline: item.deadline === undefined || item.deadline === null || item.deadline === "" ? undefined : date(item.deadline), importance: importance(item.importance ?? "normal"), baselineValue: item.baselineValue === undefined || item.baselineValue === null || item.baselineValue === "" ? undefined : number(item.baselineValue, "Goal baseline", { min: 0 }), carriedFromGoalId: item.carriedFromGoalId === undefined || item.carriedFromGoalId === null ? null : number(item.carriedFromGoalId, "Carried goal ID", { positive: true }) };
+    const directionId = item.directionId === undefined || item.directionId === null || item.directionId === "" ? null : number(item.directionId, "Direction ID", { positive: true });
+    const horizonId = item.horizonId === undefined || item.horizonId === null || item.horizonId === "" ? null : number(item.horizonId, "Horizon ID", { positive: true });
+    if (horizonId && !directionId) throw new Error("A horizon requires a direction.");
+    return { title: text(item.title, "Goal title"), area: text(item.area, "Goal area"), target: number(item.target, "Goal target", { positive: true }), goalType: goalType(item.goalType), trackingMode: mode, metricKey, deadline: item.deadline === undefined || item.deadline === null || item.deadline === "" ? undefined : date(item.deadline), importance: importance(item.importance ?? "normal"), baselineValue: item.baselineValue === undefined || item.baselineValue === null || item.baselineValue === "" ? undefined : number(item.baselineValue, "Goal baseline", { min: 0 }), carriedFromGoalId: item.carriedFromGoalId === undefined || item.carriedFromGoalId === null ? null : number(item.carriedFromGoalId, "Carried goal ID", { positive: true }), directionId, horizonId };
   }) : [];
-  const lessons = Array.isArray(body.lessons) ? body.lessons.map((value) => {
+  const lessons: SeasonPlanInput["lessons"] = Array.isArray(body.lessons) ? body.lessons.map((value) => {
     if (!value || typeof value !== "object") throw new Error("Lesson is invalid.");
     const item = value as Record<string, unknown>;
     const kind = item.kind;
     if (kind !== "carry_forward" && kind !== "leave_behind" && kind !== "lesson") throw new Error("Lesson type is invalid.");
-    return { kind, content: text(item.content ?? "", "Lesson", false) };
+    return { kind: kind as SeasonPlanInput["lessons"][number]["kind"], content: text(item.content ?? "", "Lesson", false) };
   }) : [];
   return { name: text(body.name, "Season name"), theme: text(body.theme, "Season theme"), intention: text(body.intention ?? "", "Season intention", false), startDate, endDate, previousSeasonId: body.previousSeasonId === undefined || body.previousSeasonId === null ? null : number(body.previousSeasonId, "Previous season ID", { positive: true }), areaPlans, goals, lessons };
 }

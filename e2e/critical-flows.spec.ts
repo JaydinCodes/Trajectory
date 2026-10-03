@@ -114,3 +114,36 @@ test("opens the life timeline and a factual historical date", async ({ page }) =
   const historical = await (await page.request.get(`/api/history/date?date=${date}`)).json() as { date: string };
   expect(historical.date).toBe(date);
 });
+
+test("connects a planned goal to a direction and horizon", async ({ page }) => {
+  const suffix = Date.now();
+  const area = `Career ${suffix}`;
+  const direction = await page.request.post("/api/directions", { data: { area, statement: "Own useful software and data systems end-to-end.", why: "Reliable systems matter.", effectiveFrom: "2026-10-01" } });
+  expect(direction.ok()).toBeTruthy();
+  const directionId = (await direction.json() as { id: number }).id;
+  const horizon = await page.request.post(`/api/directions/${directionId}/horizons`, { data: { name: "Next quarter", horizonType: "quarter", startDate: "2026-10-01", endDate: "2026-12-31", statement: "Become productive with the core work stack.", outcomes: ["Ship useful reporting work."] } });
+  expect(horizon.ok()).toBeTruthy();
+  const updated = await page.request.patch(`/api/directions/${directionId}`, { data: { area, statement: "Own useful software and data systems with confidence.", why: "Reliable systems matter.", effectiveFrom: "2026-12-01" } });
+  expect(updated.ok()).toBeTruthy();
+  const versions = await (await page.request.get(`/api/directions/${directionId}`)).json() as { versions: Array<{ statement: string; effectiveFrom: string; effectiveTo: string | null }> };
+  expect(versions.versions).toContainEqual(expect.objectContaining({ statement: "Own useful software and data systems end-to-end.", effectiveFrom: "2026-10-01", effectiveTo: "2026-11-30" }));
+  expect(versions.versions).toContainEqual(expect.objectContaining({ statement: "Own useful software and data systems with confidence.", effectiveFrom: "2026-12-01", effectiveTo: null }));
+  await page.goto("/direction");
+  await expect(page.getByText(area, { exact: true })).toBeVisible();
+
+  const year = 2300 + (suffix % 100);
+  await page.goto("/plan/season");
+  await page.getByLabel("Theme").fill("Build systems");
+  await page.getByLabel("Start").fill(`${year}-01-01`);
+  await page.getByLabel("End").fill(`${year}-01-31`);
+  await page.getByRole("button", { name: "Career" }).click();
+  await page.getByRole("button", { name: /Add a goal/i }).click();
+  const card = page.locator(".goal-card").first();
+  await card.getByRole("textbox", { name: "Goal" }).fill(`Power BI report ${suffix}`);
+  await card.getByLabel("Area").selectOption("Career");
+  await card.getByLabel("Supports direction").selectOption(String(directionId));
+  await page.getByRole("button", { name: "Start Season" }).click();
+  await expect(page).toHaveURL(/trajectory/);
+  const directionView = await (await page.request.get(`/api/directions?asOfDate=${year}-01-01`)).json() as { alignment: { connected: Array<{ directionId: number; goalCount: number }> } };
+  expect(directionView.alignment.connected).toContainEqual(expect.objectContaining({ directionId, goalCount: 1 }));
+});

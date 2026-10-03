@@ -1,0 +1,7 @@
+"use client";
+import Link from "next/link";
+import { useParams } from "next/navigation";
+import { useEffect, useState } from "react";
+import styles from "../direction.module.css";
+type Direction = { id: number; area: string; statement: string; horizons: Array<{ id: number; horizonType: string; startDate: string | null; endDate: string | null; statement: string }> };
+export default function YearDirectionPage() { const { year } = useParams<{ year: string }>(); const [directions, setDirections] = useState<Direction[]>([]); useEffect(() => { void fetch("/api/directions").then((response) => response.json()).then((data: { directions: Direction[] }) => setDirections(data.directions)); }, []); const start = `${year}-01-01`; const end = `${year}-12-31`; return <main className={styles.page}><Link className="back" href="/direction">← Direction</Link><header className={styles.hero}><p className="eyebrow">Year direction</p><h1>{year}</h1><p>What should be meaningfully different by the end of this year?</p></header>{directions.map((direction) => { const horizon = direction.horizons.find((item) => item.horizonType === "year" && item.startDate === start && item.endDate === end); return <section className={styles.direction} key={direction.id}><p className={styles.area}>{direction.area}</p><div><h2 className={styles.statement}>{horizon?.statement ?? direction.statement}</h2>{!horizon && <p className={styles.note}>No annual horizon defined. This direction remains deliberately broad.</p>}</div></section>; })}</main>; }
