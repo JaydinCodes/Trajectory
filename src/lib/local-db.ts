@@ -21,6 +21,8 @@ import type { AreaHistoryItem, GoalJourneyItem, HistoricalDate, HistoryMetric, S
 import { createLifeTimeline, createSeasonComparison } from "@/services/history-service";
 import { currentHorizon, resolveHistoricalDirection } from "@/services/direction-service";
 import type { DirectionOverview, DirectionStatus, DirectionVersion, Horizon, HorizonType, LifeDirection } from "@/domain/direction/types";
+import type { GoalMovementSummary, GoalLineageRecord, MoodDayRecord, PatternDataset, PatternWindow, SeasonPatternRecord, WeeklyPatternRecord } from "@/domain/patterns/types";
+import { calculatePatternIntelligence } from "@/services/pattern-intelligence-service";
 const nodeSqlite: { DatabaseSync: new (filename:string) => SqliteDatabase } = require("node:sqlite");
 
 const dataDir = path.join(process.cwd(), "data");
@@ -272,7 +274,7 @@ export function seasonPlanningContext(previousSeasonId?: number) {
    return { id: Number(goal.id), area: String(goal.area), title: String(goal.title), target: Number(goal.target), current: raw, trackingMode: goal.tracking_mode as UnfinishedGoal["trackingMode"], metricKey: goal.metric_key as UnfinishedGoal["metricKey"], goalType: goal.goal_type as UnfinishedGoal["goalType"] };
  }).filter((goal) => goal.current < goal.target) : [];
  const recommendedAreas = previous?.id ? (store.prepare("select distinct area from goals where season_id=? order by area").all(previous.id) as Array<{ area: string }>).map((item) => item.area) : [];
- return { defaults, previous: previous ? { id: previous.id, name: previous.name, startDate: previous.start_date, endDate: previous.end_date, reflection, unfinished } : null, areas: [...areas], recommendedAreas, directions: listDirections("active").map((direction) => ({ ...direction, horizons: listHorizons(direction.id).filter((horizon) => horizon.status === "active") })) };
+ return { defaults, previous: previous ? { id: previous.id, name: previous.name, startDate: previous.start_date, endDate: previous.end_date, reflection, unfinished } : null, areas: [...areas], recommendedAreas, directions: listDirections("active").map((direction) => ({ ...direction, horizons: listHorizons(direction.id).filter((horizon) => horizon.status === "active") })), patterns: establishedPatterns().slice(0, 3) };
 }
 /** Current values always stop at the requested local date. */
 export function metricTotals(season:Season, asOfDate=localDate()): Record<MetricKey,number> { return getMetricTotalsAsOf(db(),season,asOfDate); }
@@ -293,6 +295,63 @@ export function goalsWithProgress(today=localDate()) {
 }
 export function areaMomentum(area:string,today=localDate()) { const season=getActiveSeason(today); return trajectorySnapshotFor(season,today).areas.find((item)=>item.area===area)?.momentum??"insufficient_data"; }
 export function insights(today=localDate()){const store=db();const season=getActiveSeason(today);const dateRange=metricRangeAsOf(season,today);const byType=dateRange?store.prepare("select type, count(*) as count, coalesce(sum(amount),0) as total from entries where entry_date between ? and ? group by type").all(dateRange.start_date,dateRange.end_date) as Array<{type:string;count:number;total:number}>:[];const metrics=metricTotals(season,today);return {byType,bibleDays:metrics.bible_days,gymSessions:metrics.gym_sessions,codingProblems:metrics.dsa_problems,deepWorkMinutes:metrics.deep_work_minutes,tutoringRevenue:metrics.tutoring_revenue};}
+
+/** One database aggregation pass for Pattern Intelligence. Individual rules never query SQLite. */
+function patternDataset(today: string): PatternDataset {
+ const store = db();
+ // Drafts are plans, not history. Only activated or completed seasons participate.
+ const seasons = (store.prepare("select * from seasons where start_date<=? and status in ('active','completed') order by start_date").all(today) as Season[]);
+ const weeks: WeeklyPatternRecord[] = [];
+ const seasonRecords: SeasonPatternRecord[] = [];
+ const allAreas = new Set<string>();
+ for (const season of seasons) {
+   if (!season.id) continue;
+   const asOf = season.end_date < today ? season.end_date : today;
+   const goals = listGoalRecords(store, season.id) as Goal[];
+   goals.forEach((goal) => allAreas.add(goal.area));
+   const directionAreas = (store.prepare("select distinct d.area from goals g join life_directions d on d.id=g.direction_id where g.season_id=?").all(season.id) as Array<{area:string}>).map((item) => item.area);
+   const attention = getDeepWorkAttentionInRange(store, season.start_date, asOf).reduce<Record<string, number>>((result, item) => ({ ...result, [item.name]: Number(item.minutes) }), {});
+   seasonRecords.push({ id: season.id, name: season.name, startDate: season.start_date, endDate: season.end_date, completed: season.status === "completed", metrics: getMetricTotalsInRange(store, season.start_date, asOf), deepWorkByArea: attention, goalAreas: [...new Set(goals.map((goal) => goal.area))], directionAreas });
+   for (const range of getSeasonWeekRanges({ startDate: season.start_date, endDate: asOf })) {
+     if (range.startDate > today) continue;
+     const endDate = range.endDate > today ? today : range.endDate;
+     const startSnapshot = trajectorySnapshotFor(season, range.startDate);
+     const endSnapshot = trajectorySnapshotFor(season, endDate);
+     const startGoals = new Map(startSnapshot.goals.map((goal) => [goal.id, goal]));
+     const goalMovement: GoalMovementSummary[] = endSnapshot.goals.flatMap((goal) => {
+       const start = startGoals.get(goal.id); if (!start) return [];
+       const valueChange = goal.current - start.current; const progressChange = goal.actualPercentage - start.actualPercentage;
+       const expectedChange = goal.expectedPercentage - start.expectedPercentage;
+       const movement: GoalMovementSummary["movement"] = start.actualPercentage < 100 && goal.actualPercentage >= 100 ? "completed" : valueChange >= Math.max(0.5, Number(goal.target) * 0.005) || progressChange >= 1 ? "advanced" : expectedChange > 1 ? "stalled" : "maintained";
+       const momentum = endSnapshot.areas.find((item) => item.area === goal.area)?.momentum ?? "insufficient_data";
+       return [{ id: goal.id, title: goal.title, area: goal.area, progressChange: Math.round(progressChange * 10) / 10, movement, momentum }];
+     });
+     const review = store.prepare("select next_primary_focus,next_secondary_focus from weekly_reviews where season_id=? and week_start=?").get(season.id, range.startDate) as {next_primary_focus?:string;next_secondary_focus?:string}|undefined;
+     weeks.push({ weekStart: range.startDate, weekEnd: endDate, trajectoryStart: startSnapshot.score, trajectoryEnd: endSnapshot.score, trajectoryChange: Math.round((endSnapshot.score - startSnapshot.score) * 10) / 10, metrics: getMetricTotalsInRange(store, range.startDate, endDate), deepWorkByArea: getDeepWorkAttentionInRange(store, range.startDate, endDate).reduce<Record<string, number>>((result, item) => ({ ...result, [item.name]: Number(item.minutes) }), {}), goalMovement, primaryFocus: review?.next_primary_focus || undefined, secondaryFocus: review?.next_secondary_focus || undefined, milestoneCount: Number((store.prepare("select count(*) as count from milestones where achieved_at between ? and ?").get(range.startDate, endDate) as {count:number}).count) });
+   }
+ }
+ const moodDays = store.prepare("select p.entry_date as date,p.mood as mood,exists(select 1 from workouts w where w.entry_date=p.entry_date) as workout from daily_pulse p where p.mood is not null and p.entry_date<=?").all(today) as MoodDayRecord[];
+ const lineages = (store.prepare("select g.id,g.title,g.area,g.carried_from_goal_id,s.name as season_name,s.start_date as season_start,s.end_date as season_end,g.target,g.status,g.tracking_mode,g.baseline_value,g.current_value from goals g join seasons s on s.id=g.season_id where s.start_date<=?").all(today) as Array<Record<string, unknown>>).map((goal): GoalLineageRecord => {
+   const asOf = String(goal.season_end) < today ? String(goal.season_end) : today;
+   const value = goal.tracking_mode === "manual" ? manualGoalValueAsOf(store, { id: Number(goal.id), baseline_value: Number(goal.baseline_value ?? 0), current_value: Number(goal.current_value) }, asOf) : Number(goal.current_value);
+   return { id: Number(goal.id), title: String(goal.title), area: String(goal.area), seasonName: String(goal.season_name), seasonStart: String(goal.season_start), progress: Number(goal.target) > 0 ? value / Number(goal.target) * 100 : 0, carriedFromGoalId: goal.carried_from_goal_id === null ? null : Number(goal.carried_from_goal_id), completed: String(goal.status) === "completed" || value >= Number(goal.target) };
+ });
+ const completedReviews = Number((store.prepare("select count(*) as count from weekly_reviews where completed_at is not null").get() as {count:number}).count);
+ // Seasons can end and begin inside the same Monday–Sunday review range. Keep one
+ // deterministic record for that calendar week rather than double-counting evidence.
+ const weeklyByStart = new Map<string, WeeklyPatternRecord>();
+ for (const week of weeks) { const current = weeklyByStart.get(week.weekStart); if (!current || week.weekEnd > current.weekEnd) weeklyByStart.set(week.weekStart, week); }
+ const distinctWeeks = [...weeklyByStart.values()].sort((left, right) => left.weekStart.localeCompare(right.weekStart));
+ return { weeks: distinctWeeks, seasons: seasonRecords, moodDays, lineages, availableAreas: [...allAreas].sort(), coverage: { totalWeeks: distinctWeeks.length, evidenceWeeks: distinctWeeks.filter((week) => Object.values(week.metrics).some((value) => value > 0)).length, completedReviews, moodDays: moodDays.length, deepWorkWeeks: distinctWeeks.filter((week) => week.metrics.deep_work_minutes > 0).length } };
+}
+
+export function patternIntelligence(window: PatternWindow = "8w", area?: string, today = localDate()) {
+ return calculatePatternIntelligence(patternDataset(today), { window, area, today });
+}
+/** Small, established-only contextual set for review and planning surfaces. */
+export function establishedPatterns(today = localDate(), area?: string) {
+ return patternIntelligence("12w", area, today).patterns.filter((pattern) => pattern.confidence === "moderate" || pattern.confidence === "strong");
+}
 export function listMilestones(){return db().prepare("select * from milestones order by achieved_at desc,id desc").all();}
 export function addMilestone(area:string,title:string,date:string,note:string){return db().prepare("insert into milestones(area,title,achieved_at,note) values(?,?,?,?)").run(area,title,date,note);}
 export function removeMilestone(id:number){return db().prepare("delete from milestones where id=?").run(id)}
@@ -417,7 +476,7 @@ export function weeklyReview(date=localDate()) {
  const journal=db().prepare("select id,content,entry_date from journal where entry_date between ? and ? order by entry_date desc,id desc limit 2").all(range.startDate,endAsOf) as Array<{id:number;content:string;entry_date:string}>;
  const prior=previousWeeklyReflection(previousRange.startDate);
  const state=range.endDate >= localDate() ? "in_progress" : saved?.completedAt ? "complete" : "not_reviewed";
- return { analysis:calculateWeeklyReview({ range, label:formatWeekLabel(range), startGoals:startSnapshot.goals, endGoals:endSnapshot.goals, startScore:startSnapshot.score, endScore:endSnapshot.score, attention, evidence:evidenceSummaryForRange(range.startDate,endAsOf), previousWeek:previousRange.endDate > localDate()?emptyEvidence():evidenceSummaryForRange(previousRange.startDate,previousRange.endDate), milestones:milestones.map((item)=>({id:item.id,area:item.area,title:item.title,achievedAt:item.achieved_at})), journal:journal.map((item)=>({id:item.id,content:item.content,entryDate:item.entry_date})), state, priorCommitment:prior?.nextPrimaryFocus || undefined }), reflection:saved };
+ return { analysis:calculateWeeklyReview({ range, label:formatWeekLabel(range), startGoals:startSnapshot.goals, endGoals:endSnapshot.goals, startScore:startSnapshot.score, endScore:endSnapshot.score, attention, evidence:evidenceSummaryForRange(range.startDate,endAsOf), previousWeek:previousRange.endDate > localDate()?emptyEvidence():evidenceSummaryForRange(previousRange.startDate,previousRange.endDate), milestones:milestones.map((item)=>({id:item.id,area:item.area,title:item.title,achievedAt:item.achieved_at})), journal:journal.map((item)=>({id:item.id,content:item.content,entryDate:item.entry_date})), state, priorCommitment:prior?.nextPrimaryFocus || undefined }), reflection:saved, patterns: establishedPatterns(endAsOf).slice(0,2) };
 }
 
 export function saveWeeklyReview(date:string, reflection: Omit<WeeklyReflection,"completedAt">, complete:boolean) {

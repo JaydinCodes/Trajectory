@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
-import { saveSeasonReview, seasonReview, seasonReviewNavigation } from "@/lib/local-db";
+import { establishedPatterns, saveSeasonReview, seasonReview, seasonReviewNavigation } from "@/lib/local-db";
 import { apiError, date, number, text } from "@/lib/validation";
+import { localDate } from "@/lib/date-time";
 
 export const runtime = "nodejs";
 
@@ -19,7 +20,11 @@ export async function GET(request: NextRequest) {
   try {
     const seasonId = requestSeasonId(request);
     const asOf = request.nextUrl.searchParams.get("asOfDate");
-    return NextResponse.json({ review: seasonReview(seasonId, asOf ? date(asOf) : undefined), seasons: seasonReviewNavigation() });
+    const review = seasonReview(seasonId, asOf ? date(asOf) : undefined);
+    const patternDate = review.season.endDate < localDate() ? review.season.endDate : localDate();
+    const areas = new Set(review.goals.all.map((goal) => goal.area));
+    const patterns = establishedPatterns(patternDate).filter((pattern) => pattern.relatedAreas?.some((area) => areas.has(area))).slice(0, 1);
+    return NextResponse.json({ review, seasons: seasonReviewNavigation(), patterns });
   } catch (error) { return NextResponse.json(apiError(error), { status: 400 }); }
 }
 
@@ -35,6 +40,7 @@ export async function PUT(request: NextRequest) {
       carryForward: reflectionText(body.carryForward, "What to carry forward"),
       leaveBehind: reflectionText(body.leaveBehind, "What to leave behind"),
     }, body.complete === true);
-    return NextResponse.json({ review: seasonReview(seasonId), seasons: seasonReviewNavigation() });
+    const review = seasonReview(seasonId); const areas = new Set(review.goals.all.map((goal) => goal.area));
+    return NextResponse.json({ review, seasons: seasonReviewNavigation(), patterns: establishedPatterns().filter((pattern) => pattern.relatedAreas?.some((area) => areas.has(area))).slice(0, 1) });
   } catch (error) { return NextResponse.json(apiError(error), { status: 400 }); }
 }

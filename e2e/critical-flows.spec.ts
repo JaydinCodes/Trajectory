@@ -115,6 +115,32 @@ test("opens the life timeline and a factual historical date", async ({ page }) =
   expect(historical.date).toBe(date);
 });
 
+test("Pattern Intelligence shows reproducible coding evidence after enough weekly history", async ({ page }) => {
+  const today = await page.evaluate(() => new Intl.DateTimeFormat("en-CA", { timeZone: "Africa/Johannesburg", year: "numeric", month: "2-digit", day: "2-digit" }).formatToParts(new Date()).reduce<Record<string, string>>((all, part) => ({ ...all, [part.type]: part.value }), {}));
+  const todayDate = `${today.year}-${today.month}-${today.day}`;
+  const historicalDays = 49 + (Date.now() % 10);
+  const start = shiftDate(todayDate, -historicalDays);
+  const end = todayDate;
+  const name = `Patterns history ${Date.now()}`;
+  const created = await page.request.post("/api/seasons", { data: { name, theme: "Historical evidence", startDate: start, endDate: end } });
+  expect(created.ok()).toBeTruthy();
+  for (let index = 0; index <= historicalDays; index += 6) {
+    const recorded = await page.request.post("/api/records/coding", { data: { problems: 4 + index, category: "Pattern evidence", date: shiftDate(start, index) } });
+    expect(recorded.ok()).toBeTruthy();
+  }
+  const seasons = await (await page.request.get("/api/seasons")).json() as { seasons: Array<{ id: number; name: string }> };
+  const season = seasons.seasons.find((item) => item.name === name);
+  expect(season).toBeDefined();
+  const completed = await page.request.put("/api/reviews/season", { data: { seasonId: season?.id, proudOf: "Pattern evidence.", changedMost: "Coding records.", obstacles: "", lesson: "", carryForward: "", leaveBehind: "", complete: true } });
+  expect(completed.ok()).toBeTruthy();
+  await page.goto("/patterns?window=all");
+  await expect(page.getByRole("heading", { name: "Coding consistency" })).toBeVisible();
+  const pattern = page.locator("article").filter({ has: page.getByRole("heading", { name: "Coding consistency" }) });
+  await pattern.getByRole("button", { name: "View evidence" }).click();
+  await expect(page.getByRole("dialog")).toContainText("DSA problems");
+  expect(await page.getByRole("dialog").locator("article").count()).toBeGreaterThanOrEqual(3);
+});
+
 test("connects a planned goal to a direction and horizon", async ({ page }) => {
   const suffix = Date.now();
   const area = `Career ${suffix}`;

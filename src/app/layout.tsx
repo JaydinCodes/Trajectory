@@ -5,6 +5,7 @@ import "./redesign.css";
 import "./trajectory-redesign.css";
 import "./dashboard-overrides.css";
 import "./shell-overrides.css";
+import "./pattern-context.css";
 import { AppChrome } from "@/components/app-chrome";
 
 export const metadata: Metadata = { title: "Trajectory — Your life, in motion", description: "A personal goal operating system." };

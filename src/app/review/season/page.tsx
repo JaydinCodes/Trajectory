@@ -4,10 +4,11 @@ import Link from "next/link";
 import { Suspense, useEffect, useMemo, useState } from "react";
 import { ArrowLeft, Check, ChevronLeft, ChevronRight } from "lucide-react";
 import type { SeasonReflection, SeasonReview } from "@/domain/season-review/types";
+import type { PatternObservation } from "@/domain/patterns/types";
 import styles from "./season-review.module.css";
 
 type SeasonLink = { id: number; name: string; startDate: string; endDate: string; state: "in_progress" | "reviewed" | "not_reviewed" };
-type Response = { review: SeasonReview; seasons: SeasonLink[] };
+type Response = { review: SeasonReview; seasons: SeasonLink[]; patterns: PatternObservation[] };
 type Form = Omit<SeasonReflection, "completedAt">;
 const blank: Form = { proudOf: "", changedMost: "", obstacles: "", lesson: "", carryForward: "", leaveBehind: "" };
 const duration = (minutes: number) => minutes >= 60 ? `${Math.floor(minutes / 60)}h ${minutes % 60}m` : `${minutes}m`;
@@ -86,6 +87,7 @@ function SeasonReviewContent() {
         <div className={styles.trajectoryNumbers}><article><span>Start of season</span><strong>{review.trajectory.startScore}%</strong></article><b>→</b><article><span>End of season</span><strong>{review.trajectory.endScore}%</strong></article><em className={review.trajectory.change >= 0 ? styles.positive : ""}>{review.trajectory.change >= 0 ? "+" : ""}{review.trajectory.change}</em></div>
         {review.trajectory.expectedEndScore > 0 && <small>Expected position at this point: {review.trajectory.expectedEndScore}%.</small>}
       </section>
+      {!!data.patterns.length && <Section eyebrow="Pattern in context" title="What the longer record shows."><div className="season-pattern-context">{data.patterns.map((pattern) => <article key={pattern.id}><p>{pattern.statement}</p><small>Based on {pattern.sampleSize} periods · {pattern.confidence} confidence · <Link href={`/patterns?window=12w${pattern.relatedAreas?.[0] ? `&area=${encodeURIComponent(pattern.relatedAreas[0])}` : ""}`}>View evidence</Link></small></article>)}</div></Section>}
 
       <Section eyebrow="The goals" title="What moved, in exact terms.">
         {review.goals.all.length ? <div className={styles.goals}>{review.goals.all.map((goal) => <article key={goal.id}><p>{goal.area}</p><h3>{goal.title}</h3><strong>{count(goal.endValue)} / {count(goal.target)}</strong><div className={styles.progress}><i style={{ width: `${goal.endPercentage}%` }} /></div><div className={styles.goalDetail}><span>Start {count(goal.startValue)} · {count(goal.startPercentage)}%</span><span>End {count(goal.endValue)} · {count(goal.endPercentage)}%</span><b>{goal.movement >= 0 ? "+" : ""}{count(goal.movement)} points · {goal.trajectoryStatus.replace("_", " ")}</b></div><small>{goal.evidence.records ? `${goal.evidence.records} recorded item${goal.evidence.records === 1 ? "" : "s"} across ${goal.evidence.activeDays} day${goal.evidence.activeDays === 1 ? "" : "s"}.` : "No dated evidence was recorded for this goal."}</small></article>)}</div> : <Empty text="No goals were attached to this season." />}
