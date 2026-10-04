@@ -1,5 +1,6 @@
 import type { MetricKey } from "../../lib/trajectory/types";
 import type { SqliteDatabase } from "./types";
+import { withTransaction } from "./transaction";
 
 export type GoalOptions = { metricKey?: MetricKey | null; trackingMode?: "derived" | "manual"; seasonId?: number | null };
 
@@ -27,9 +28,11 @@ export function updateManualGoal(database: SqliteDatabase, id: number, currentVa
     ? database.prepare("select tracking_mode from goals where id=?").get(id)
     : database.prepare("select tracking_mode from goals where id=? and season_id=?").get(id, seasonId);
   if (!goal) return undefined;
-  const result = updateGoal(database, id, currentValue, status, seasonId);
-  if ((goal as { tracking_mode: string }).tracking_mode === "manual") database.prepare("insert into goal_updates(goal_id,value,status,effective_date) values(?,?,?,?)").run(id, currentValue, status, effectiveDate);
-  return result;
+  return withTransaction(database, () => {
+    const result = updateGoal(database, id, currentValue, status, seasonId);
+    if ((goal as { tracking_mode: string }).tracking_mode === "manual") database.prepare("insert into goal_updates(goal_id,value,status,effective_date) values(?,?,?,?)").run(id, currentValue, status, effectiveDate);
+    return result;
+  });
 }
 
 export function manualGoalValueAsOf(database: SqliteDatabase, goal: { id: number; baseline_value?: number; current_value: number }, asOfDate: string): number {

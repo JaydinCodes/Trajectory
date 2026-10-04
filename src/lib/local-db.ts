@@ -23,10 +23,13 @@ import { currentHorizon, resolveHistoricalDirection } from "@/services/direction
 import type { DirectionOverview, DirectionStatus, DirectionVersion, Horizon, HorizonType, LifeDirection } from "@/domain/direction/types";
 import type { GoalMovementSummary, GoalLineageRecord, MoodDayRecord, PatternDataset, PatternWindow, SeasonPatternRecord, WeeklyPatternRecord } from "@/domain/patterns/types";
 import { calculatePatternIntelligence } from "@/services/pattern-intelligence-service";
+import { integrityReport } from "@/data/sqlite/integrity";
+import { runMigrations, schemaVersion } from "@/data/sqlite/migrations";
+import { withTransaction } from "@/data/sqlite/transaction";
 const nodeSqlite: { DatabaseSync: new (filename:string) => SqliteDatabase } = require("node:sqlite");
 
-const dataDir = path.join(process.cwd(), "data");
-const dbPath = path.join(dataDir, "trajectory.db");
+const dbPath = process.env.TRAJECTORY_DB_PATH ? path.resolve(process.env.TRAJECTORY_DB_PATH) : path.join(process.cwd(), "data", "trajectory.db");
+const dataDir = path.dirname(dbPath);
 let database: SqliteDatabase | undefined;
 function addColumn(store: SqliteDatabase, table: string, definition: string) {
   const column = definition.split(/\s+/)[0];
@@ -37,7 +40,9 @@ function db() {
   if (database) return database;
   fs.mkdirSync(dataDir, { recursive: true });
   database = new nodeSqlite.DatabaseSync(dbPath);
+  database.exec("pragma foreign_keys = on");
   database.exec("pragma journal_mode = WAL");
+  database.exec("pragma busy_timeout = 5000");
   database.exec(`
     create table if not exists entries (id integer primary key, type text not null, detail text not null, amount real, entry_date text not null, created_at text not null default current_timestamp);
     create table if not exists journal (id integer primary key, entry_type text not null, content text not null, entry_date text not null, created_at text not null default current_timestamp);
@@ -101,6 +106,7 @@ function db() {
   database.exec("create index if not exists goals_horizon_idx on goals(horizon_id)");
   database.exec("create index if not exists direction_versions_lookup_idx on direction_versions(direction_id,effective_from,effective_to)");
   database.exec("create index if not exists horizons_direction_range_idx on horizons(direction_id,start_date,end_date)");
+  runMigrations(database, dbPath);
   // Data created before lifecycle support was implicitly current when its dates contained today.
   // Record completion so a newly saved current-date draft is never auto-activated on restart.
   const lifecycleBackfill = database.prepare("select value from settings where key='season_lifecycle_backfill_v1'").get();
@@ -114,11 +120,16 @@ function db() {
   database.exec("update entries set metric_key='tutoring_revenue', project='Odysseus', area='Odysseus' where metric_key is null and type='Revenue'");
   database.exec("update financial_entries set metric_key='tutoring_revenue', project='Odysseus', area='Odysseus' where metric_key is null and kind='income' and category='Tutoring'");
   const count = database.prepare("select count(*) as n from entries").get() as {n:number};
-  if (!count.n) seed(database);
-  database.prepare("insert or ignore into season_snapshots(month,bible_days,gym_sessions,coding_problems,deep_work_minutes) values(?,?,?,?,?)").run("September 2026",18,10,52,610);
+  if (!count.n && process.env.TRAJECTORY_SEED_DEMO === "true") seed(database);
   return database;
 }
 function seed(store: SqliteDatabase) {
+ const today = localDate(); const currentMonth = new Date(`${today.slice(0, 7)}-01T12:00:00Z`); currentMonth.setUTCMonth(currentMonth.getUTCMonth() - 1); const previousStart = currentMonth.toISOString().slice(0, 10); const previousEnd = `${previousStart.slice(0, 8)}${String(daysInMonth(previousStart)).padStart(2, "0")}`;
+ const currentStart = `${today.slice(0, 7)}-01`; const currentEnd = `${today.slice(0, 8)}${String(daysInMonth(today)).padStart(2, "0")}`;
+ // The explicit test/demo fixture contains a prior completed season so historical review flows have a real period.
+ store.prepare("insert or ignore into seasons(name,theme,start_date,end_date,status,completed_at) values(?,?,?,?,?,current_timestamp)").run(monthName(previousStart), "Demo history", previousStart, previousEnd, "completed");
+ // Keep a separate active fixture season: a completed period must never be treated as the current season.
+ store.prepare("insert or ignore into seasons(name,theme,start_date,end_date,status,activated_at) values(?,?,?,?,?,current_timestamp)").run(monthName(today), "Demo current season", currentStart, currentEnd, "active");
  const add=store.prepare("insert into entries(type,detail,amount,entry_date) values(?,?,?,?)");
  [["Bible","Jeremiah 12–13 · 28 minutes",2,"2026-10-14"],["Workout","Push · 71 minutes · bench 77.5kg × 7",71,"2026-10-14"],["DSA","4 problems: arrays and hash maps",4,"2026-10-14"],["Deep work","Odysseus pitch deck",90,"2026-10-14"],["Revenue","Tutoring income",800,"2026-10-04"],["Deep work","Ledgerly statement parsing",120,"2026-10-07"]].forEach(v=>add.run(...v));
  store.prepare("insert into journal(entry_type,content,entry_date) values(?,?,?)").run("career","I finally understood how the ERP workflow fits together today. It made the newness of the job feel less intimidating.","2026-10-14");
@@ -150,8 +161,8 @@ export function addFinance(kind:string,category:string,amount:number,date:string
 export function removeFinance(id:number){return db().prepare("delete from financial_entries where id=?").run(id);}
 export function listBudgets(){return db().prepare("select * from budgets order by category").all()}
 export function saveBudget(category:string,target:number){return db().prepare("insert into budgets(category,monthly_target,updated_at) values(?,?,current_timestamp) on conflict(category) do update set monthly_target=excluded.monthly_target,updated_at=current_timestamp").run(category,target)}
-export function addRecord(kind:string, values:Record<string,unknown>){const store=db();const date=String(values.date ?? localDate());if(kind==="bible")return store.prepare("insert into bible_entries(book,chapters,minutes,entry_date,note) values(?,?,?,?,?)").run(values.book,values.chapters??null,values.minutes??null,date,values.note??null);if(kind==="workout"){store.prepare("insert into workouts(workout_type,duration,body_weight,notes,entry_date) values(?,?,?,?,?)").run(values.workoutType,values.duration,values.bodyWeight??null,values.notes??null,date);const id=(store.prepare("select last_insert_rowid() as id").get() as {id:number}).id;const exercises=Array.isArray(values.exercises)?values.exercises:[];for(const item of exercises){if(item&&typeof item==="object"){const x=item as Record<string,unknown>;if(x.exercise)store.prepare("insert into workout_exercises(workout_id,exercise,sets,reps,weight,rpe) values(?,?,?,?,?,?)").run(id,x.exercise,x.sets??null,x.reps??null,x.weight??null,x.rpe??null)}}return id}if(kind==="coding")return store.prepare("insert into coding_entries(problems,category,platform,entry_date,note) values(?,?,?,?,?)").run(values.problems,values.category,values.platform??null,date,values.note??null);if(kind==="pulse")return store.prepare("insert into daily_pulse(entry_date,mood,energy,stress,updated_at) values(?,?,?,?,current_timestamp) on conflict(entry_date) do update set mood=excluded.mood,energy=excluded.energy,stress=excluded.stress,updated_at=current_timestamp").run(date,values.mood,values.energy,values.stress);throw new Error("Unsupported record type");}
-export function listRecords(kind:string){const tables:Record<string,string>={bible:"bible_entries",workout:"workouts",coding:"coding_entries",pulse:"daily_pulse"};const table=tables[kind];if(!table)throw new Error("Unsupported record type");return db().prepare(`select * from ${table} order by entry_date desc,id desc`).all();}
+export function addRecord(kind:string, values:Record<string,unknown>){const store=db();const date=String(values.date ?? localDate());if(kind==="bible")return store.prepare("insert into bible_entries(book,chapters,minutes,entry_date,note) values(?,?,?,?,?)").run(values.book,values.chapters??null,values.minutes??null,date,values.note??null);if(kind==="workout")return withTransaction(store,()=>{store.prepare("insert into workouts(workout_type,duration,body_weight,notes,entry_date) values(?,?,?,?,?)").run(values.workoutType,values.duration,values.bodyWeight??null,values.notes??null,date);const id=(store.prepare("select last_insert_rowid() as id").get() as {id:number}).id;const exercises=Array.isArray(values.exercises)?values.exercises:[];for(const item of exercises){if(item&&typeof item==="object"){const x=item as Record<string,unknown>;if(x.exercise)store.prepare("insert into workout_exercises(workout_id,exercise,sets,reps,weight,rpe) values(?,?,?,?,?,?)").run(id,x.exercise,x.sets??null,x.reps??null,x.weight??null,x.rpe??null)}}return id});if(kind==="coding")return store.prepare("insert into coding_entries(problems,category,platform,entry_date,note) values(?,?,?,?,?)").run(values.problems,values.category,values.platform??null,date,values.note??null);if(kind==="pulse")return store.prepare("insert into daily_pulse(entry_date,mood,energy,stress,updated_at) values(?,?,?,?,current_timestamp) on conflict(entry_date) do update set mood=excluded.mood,energy=excluded.energy,stress=excluded.stress,updated_at=current_timestamp").run(date,values.mood,values.energy,values.stress);throw new Error("Unsupported record type");}
+export function listRecords(kind:string){const queries:Record<string,string>={bible:"select * from bible_entries order by entry_date desc,id desc",workout:"select * from workouts order by entry_date desc,id desc",coding:"select * from coding_entries order by entry_date desc,id desc",pulse:"select * from daily_pulse order by entry_date desc"};const query=queries[kind];if(!query)throw new Error("Unsupported record type");return db().prepare(query).all();}
 export function removeRecord(kind:string,id:number){const tables:Record<string,string>={bible:"bible_entries",workout:"workouts",coding:"coding_entries"};const table=tables[kind];if(!table)throw new Error("Unsupported record type");return db().prepare(`delete from ${table} where id=?`).run(id);}
 export function getActiveSeason(today = localDate()): Season {
  const store=db(); const existing=store.prepare("select * from seasons where status in ('active','completed') and start_date<=? and end_date>=? order by case status when 'active' then 0 else 1 end, start_date desc limit 1").get(today,today) as Season|undefined;
@@ -191,21 +202,19 @@ export function listDirections(status?: DirectionStatus): LifeDirection[] {
 export function createDirection(input: DirectionInput) {
  const store = db();
  if (store.prepare("select id from life_directions where lower(area)=lower(?) and status='active'").get(input.area)) throw new Error("This life area already has an active direction.");
- store.exec("begin immediate");
- try {
+ return withTransaction(store, () => {
    store.prepare("insert into life_directions(area,statement,why,status,updated_at) values(?,?,?,'active',current_timestamp)").run(input.area.trim(), input.statement.trim(), input.why?.trim() || null);
    const id = Number((store.prepare("select last_insert_rowid() as id").get() as { id: number }).id);
    store.prepare("insert into direction_versions(direction_id,statement,why,effective_from) values(?,?,?,?)").run(id, input.statement.trim(), input.why?.trim() || null, input.effectiveFrom);
-   store.exec("commit"); return id;
- } catch (error) { store.exec("rollback"); throw error; }
+   return id;
+ });
 }
 
 export function updateDirection(directionId: number, input: DirectionInput) {
  const store = db(); const direction = store.prepare("select * from life_directions where id=?").get(directionId) as Record<string, unknown> | undefined;
  if (!direction) throw new Error("Direction not found.");
  const latest = store.prepare("select * from direction_versions where direction_id=? order by effective_from desc,id desc limit 1").get(directionId) as Record<string, unknown> | undefined;
- store.exec("begin immediate");
- try {
+ withTransaction(store, () => {
    store.prepare("update life_directions set area=?,statement=?,why=?,updated_at=current_timestamp where id=?").run(input.area.trim(), input.statement.trim(), input.why?.trim() || null, directionId);
    if (!latest || String(latest.statement) !== input.statement.trim() || String(latest.why ?? "") !== (input.why?.trim() ?? "")) {
      if (latest && String(latest.effective_from) < input.effectiveFrom) {
@@ -216,8 +225,7 @@ export function updateDirection(directionId: number, input: DirectionInput) {
        store.prepare("update direction_versions set statement=?,why=? where id=?").run(input.statement.trim(), input.why?.trim() || null, latest.id);
      }
    }
-   store.exec("commit");
- } catch (error) { store.exec("rollback"); throw error; }
+ });
 }
 
 export function setDirectionStatus(directionId: number, status: DirectionStatus) {
@@ -232,13 +240,12 @@ export function listHorizons(directionId: number): Horizon[] {
 
 export function createHorizon(directionId: number, input: HorizonInput) {
  const store = db(); if (!store.prepare("select id from life_directions where id=?").get(directionId)) throw new Error("Direction not found.");
- store.exec("begin immediate");
- try {
+ return withTransaction(store, () => {
    store.prepare("insert into horizons(direction_id,name,horizon_type,start_date,end_date,statement,status,updated_at) values(?,?,?,?,?,?,'active',current_timestamp)").run(directionId, input.name.trim(), input.horizonType, input.startDate ?? null, input.endDate ?? null, input.statement.trim());
    const id = Number((store.prepare("select last_insert_rowid() as id").get() as { id: number }).id);
    input.outcomes.filter(Boolean).forEach((outcome, position) => store.prepare("insert into horizon_outcomes(horizon_id,statement,position) values(?,?,?)").run(id, outcome.trim(), position));
-   store.exec("commit"); return id;
- } catch (error) { store.exec("rollback"); throw error; }
+   return id;
+ });
 }
 
 export function directionForDate(directionId: number, value: string) { return resolveHistoricalDirection(listDirectionVersions(directionId), value); }
@@ -352,6 +359,10 @@ export function patternIntelligence(window: PatternWindow = "8w", area?: string,
 export function establishedPatterns(today = localDate(), area?: string) {
  return patternIntelligence("12w", area, today).patterns.filter((pattern) => pattern.confidence === "moderate" || pattern.confidence === "strong");
 }
+export function databaseHealth() {
+ try { const store = db(); const report = integrityReport(store); return { ok: report.foreignKeysEnabled && report.integrity.every((value) => value === "ok") && report.foreignKeys.length === 0, schemaVersion: schemaVersion(store) }; }
+ catch { return { ok: false, schemaVersion: 0 }; }
+}
 export function listMilestones(){return db().prepare("select * from milestones order by achieved_at desc,id desc").all();}
 export function addMilestone(area:string,title:string,date:string,note:string){return db().prepare("insert into milestones(area,title,achieved_at,note) values(?,?,?,?)").run(area,title,date,note);}
 export function removeMilestone(id:number){return db().prepare("delete from milestones where id=?").run(id)}
@@ -384,7 +395,11 @@ export function fullSeasonGoalEvidence(goalId:number,today=localDate()) {
  const manual=(listEvidence(goalId) as Array<Record<string,unknown>>).map(item=>({...item,source:"manual"})); if(goal.tracking_mode!=="derived" || !goal.metric_key) return manual;
  return [...getFullSeasonMetricEvents(store,goal.metric_key,season).map(item=>({...item,value:item.label,source:"derived"})),...manual];
 }
-export function exportData(){const store=db();const tables=["entries","journal","reviews","goals","goal_evidence","financial_entries","milestones","bible_entries","workouts","workout_exercises","coding_entries","daily_pulse","settings","life_directions","direction_versions","horizons","horizon_outcomes"];return Object.fromEntries(tables.map(table=>[table,store.prepare(`select * from ${table}`).all()]));}
+export function exportData(){
+ const store=db();
+ const tables=["entries","journal","reviews","goals","goal_evidence","goal_updates","financial_entries","budgets","milestones","bible_entries","workouts","workout_exercises","coding_entries","daily_pulse","settings","tags","journal_tags","monthly_reviews","season_snapshots","seasons","weekly_reviews","season_reviews","season_area_plans","season_planning_lessons","life_directions","direction_versions","horizons","horizon_outcomes"];
+ return {schemaVersion:schemaVersion(store),exportedAt:new Date().toISOString(),appVersion:"0.1.0",data:Object.fromEntries(tables.map(table=>[table,store.prepare(`select * from ${table}`).all()]))};
+}
 export function reviewSummary(){const d=insights();const priority=d.deepWorkMinutes<480?"Schedule one protected Ledgerly block before the week fills up.":"Protect the routines that are already generating evidence.";return {summary:`This week contains ${d.bibleDays} Scripture records, ${d.gymSessions} training sessions, and ${d.codingProblems} coding problems.`,priority};}
 export function correlations(){const store=db();const trained=store.prepare("select avg(p.mood) as average from daily_pulse p where exists(select 1 from workouts w where w.entry_date=p.entry_date)").get() as {average:number|null};const rest=store.prepare("select avg(p.mood) as average from daily_pulse p where not exists(select 1 from workouts w where w.entry_date=p.entry_date)").get() as {average:number|null};return {gymMood:trained.average===null||rest.average===null?null:{trained:Math.round(trained.average*10)/10,rest:Math.round(rest.average*10)/10}}}
 export function comparison(){const previous=db().prepare("select * from season_snapshots order by id desc limit 1").get() as Record<string,unknown>|undefined;const current=insights();return {previous,current:{month:monthName(),bible_days:current.bibleDays,gym_sessions:current.gymSessions,coding_problems:current.codingProblems,deep_work_minutes:current.deepWorkMinutes}}}
@@ -556,9 +571,11 @@ export function saveSeasonReview(seasonId: number, reflection: Omit<SeasonReflec
  if (!season?.id) throw new Error("Season not found.");
  if (savedSeasonReflection(season.id)?.completedAt) throw new Error("Completed season reviews are historical records and cannot be changed.");
  const completedAt = complete ? new Date().toISOString() : null;
+ return withTransaction(db(), () => {
  const result = db().prepare(`insert into season_reviews(season_id,proud_of,changed_most,obstacles,lesson,carry_forward,leave_behind,completed_at,updated_at)
  values(?,?,?,?,?,?,?,?,current_timestamp)
  on conflict(season_id) do update set proud_of=excluded.proud_of,changed_most=excluded.changed_most,obstacles=excluded.obstacles,lesson=excluded.lesson,carry_forward=excluded.carry_forward,leave_behind=excluded.leave_behind,completed_at=case when excluded.completed_at is not null then excluded.completed_at else season_reviews.completed_at end,updated_at=current_timestamp`).run(season.id, reflection.proudOf, reflection.changedMost, reflection.obstacles, reflection.lesson, reflection.carryForward, reflection.leaveBehind, completedAt);
  if (complete) db().prepare("update seasons set status='completed',completed_at=current_timestamp,updated_at=current_timestamp where id=? and status<>'completed'").run(season.id);
  return result;
+ });
 }
