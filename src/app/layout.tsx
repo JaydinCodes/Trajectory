@@ -9,6 +9,7 @@ import "./pattern-context.css";
 import { AppChrome } from "@/components/app-chrome";
 
 export const metadata: Metadata = { title: "Trajectory — Your life, in motion", description: "A personal goal operating system." };
+export const viewport = { width: "device-width", initialScale: 1 };
 export default function RootLayout({ children }: Readonly<{children: React.ReactNode}>) {
   return <html lang="en"><body><AppChrome>{children}</AppChrome></body></html>;
 }

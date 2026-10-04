@@ -17,7 +17,7 @@ export async function POST(request: NextRequest) {
     const quantity = () => number(body.quantity, "Value", { positive: true });
     if (kind === "Scripture") addRecord("bible", { book: detail, minutes: quantity(), date: entryDate });
     if (kind === "Workout") addRecord("workout", { workoutType: detail, duration: quantity(), date: entryDate, exercises: [] });
-    if (kind === "DSA") addRecord("coding", { problems: quantity(), category: detail, date: entryDate });
+    if (kind === "DSA") addRecord("coding", { problems: quantity(), category: detail, platform: text(body.platform ?? "", "Platform", false) || undefined, date: entryDate });
     if (kind === "Deep Work") addEntry("Deep work", detail, quantity(), entryDate, { area: text(body.area ?? "Career", "Area"), project: project || undefined, metricKey: "deep_work_minutes" });
     if (kind === "Tutoring Revenue") addFinance("income", detail, quantity(), entryDate, "", { area: "Odysseus", project: project || "Odysseus", metricKey: "tutoring_revenue" });
     if (kind === "Finance") addFinance("expense", detail, quantity(), entryDate, "", { area: text(body.area ?? "Finance", "Area") });

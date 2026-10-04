@@ -1,405 +1,49 @@
 "use client";
+
 import Link from "next/link";
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { Plus, Search } from "lucide-react";
-import {
-  Attention,
-  areaColors,
-  LifeOrbit,
-  ProgressChart,
-} from "@/components/dashboard-visuals";
-import { formatDashboardDate, localDate } from "@/lib/date-time";
-type Area = {
-  area: string;
-  score: number;
-  expected: number;
-  delta: number;
-  momentum:
-    "accelerating" | "steady" | "slowing" | "stalled" | "insufficient_data";
-};
-type Goal = {
-  id: number;
-  area: string;
-  title: string;
-  target: number;
-  current: number;
-};
-type Dashboard = {
-  score: number;
-  expected: number;
-  delta: number;
-  projected: number;
-  season: { name: string; theme: string };
-  seasonProgress: { percentage: number };
-  deepWorkMinutes: number;
-  areas: Area[];
-  goals: Goal[];
-};
-type Entry = {
-  id: number;
-  type: string;
-  detail: string;
-  amount: number | null;
-  entry_date: string;
-  area: string | null;
-  project: string | null;
-};
-type Journal = {
-  id: number;
-  content: string;
-  entry_type: string;
-  entry_date: string;
-};
-const areaOrder = [
-  "Faith",
-  "Fitness",
-  "Odysseus",
-  "Ledgerly",
-  "Career",
-  "Coding",
-  "Finance",
-  "Personal",
-];
-const logKinds = [
-  "Scripture",
-  "Workout",
-  "Deep Work",
-  "DSA",
-  "Tutoring Revenue",
-  "Finance",
-  "Journal",
-  "Milestone",
-  "Mood",
-];
+import { Attention, areaColors, LifeOrbit, ProgressChart } from "@/components/dashboard-visuals";
+import { useQuickLog } from "@/components/app-chrome";
+import { formatDashboardDate } from "@/lib/date-time";
+
+type Area = { area: string; score: number; expected: number; delta: number; momentum: "accelerating" | "steady" | "slowing" | "stalled" | "insufficient_data" };
+type Goal = { id: number; area: string; title: string; target: number; current: number };
+type Dashboard = { score: number; expected: number; delta: number; projected: number; season: { name: string; theme: string }; seasonProgress: { percentage: number }; deepWorkMinutes: number; areas: Area[]; goals: Goal[] };
+type Entry = { id: number; type: string; detail: string; amount: number | null; entry_date: string; area: string | null; project: string | null };
+type Journal = { id: number; content: string; entry_type: string; entry_date: string };
+const areaOrder = ["Faith", "Fitness", "Odysseus", "Ledgerly", "Career", "Coding", "Finance", "Personal"];
+
 export default function Home() {
-  const [data, setData] = useState<Dashboard>(),
-    [entries, setEntries] = useState<Entry[]>([]),
-    [journal, setJournal] = useState<Journal[]>([]),
-    [open, setOpen] = useState(false),
-    [kind, setKind] = useState("Deep Work"),
-    [detail, setDetail] = useState(""),
-    [quantity, setQuantity] = useState("30"),
-    [date, setDate] = useState(localDate()),
-    [project, setProject] = useState(""),
-    [error, setError] = useState("");
-  const reload = async () => {
-    const [dashboard, entryList, journalList] = await Promise.all(
-      ["/api/dashboard", "/api/entries", "/api/journal"].map((url) =>
-        fetch(url).then((response) => response.json()),
-      ),
-    );
-    setData(dashboard);
-    setEntries(entryList);
-    setJournal(journalList);
-  };
-  useEffect(() => {
-    void reload();
+  const quickLog = useQuickLog();
+  const [data, setData] = useState<Dashboard>(); const [entries, setEntries] = useState<Entry[]>([]); const [journal, setJournal] = useState<Journal[]>([]); const [error, setError] = useState("");
+  const reload = useCallback(async () => {
+    try {
+      setError("");
+      const responses = await Promise.all(["/api/dashboard", "/api/entries", "/api/journal"].map((url) => fetch(url)));
+      if (responses.some((response) => !response.ok)) throw new Error("We couldn't load Today.");
+      const [dashboard, entryList, journalList] = await Promise.all(responses.map((response) => response.json()));
+      setData(dashboard as Dashboard); setEntries(entryList as Entry[]); setJournal(journalList as Journal[]);
+    } catch { setError("We couldn't load Today. Your data has not been changed."); }
   }, []);
-  useEffect(() => {
-    const onKey = (event: KeyboardEvent) => {
-      if (
-        event.key.toLowerCase() === "l" &&
-        !(
-          event.target instanceof HTMLInputElement ||
-          event.target instanceof HTMLTextAreaElement
-        )
-      ) {
-        event.preventDefault();
-        setOpen(true);
-      }
-    };
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, []);
-  async function log(event: React.FormEvent) {
-    event.preventDefault();
-    if (!detail.trim()) return;
-    const response = await fetch("/api/quick-log", {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({
-        kind,
-        detail: detail.trim(),
-        quantity: Number(quantity),
-        date,
-        project,
-      }),
-    });
-    if (!response.ok) {
-      setError((await response.json()).error ?? "Could not save this record.");
-      return;
-    }
-    setDetail("");
-    setProject("");
-    setError("");
-    setOpen(false);
-    void reload();
-  }
-  const areas = areaOrder.map(
-    (area) =>
-      data?.areas?.find((item) => item.area === area) ?? {
-        area,
-        score: 0,
-        expected: 0,
-        delta: 0,
-        momentum: "insufficient_data" as const,
-      },
-  );
-  const attentionParts = Object.entries(
-    entries
-      .filter((entry) => entry.area || entry.project)
-      .reduce<Record<string, number>>((total, entry) => {
-        const key = entry.project ?? entry.area;
-        if (key) total[key] = (total[key] ?? 0) + Number(entry.amount ?? 0);
-        return total;
-      }, {}),
-  ).map(([name, value]) => ({ name, value }));
+  useEffect(() => { void reload(); }, [reload]);
+  useEffect(() => { const refresh = () => void reload(); window.addEventListener("trajectory:data-changed", refresh); return () => window.removeEventListener("trajectory:data-changed", refresh); }, [reload]);
+  const areas = areaOrder.map((area) => data?.areas.find((item) => item.area === area) ?? { area, score: 0, expected: 0, delta: 0, momentum: "insufficient_data" as const });
+  const attentionParts = Object.entries(entries.filter((entry) => entry.area || entry.project).reduce<Record<string, number>>((total, entry) => { const key = entry.project ?? entry.area; if (key) total[key] = (total[key] ?? 0) + Number(entry.amount ?? 0); return total; }, {})).map(([name, value]) => ({ name, value }));
   const latest = journal[0];
-  return (
-    <main className="app-shell">
-      <div className="dashboard">
-        <header className="topline">
-          <div>
-            <p>{formatDashboardDate()}</p>
-            <h1>Good morning, Jaydin.</h1>
-          </div>
-          <div className="top-actions">
-            <Link href="/search">
-              <Search size={16} /> Search
-            </Link>
-            <button className="primary" onClick={() => setOpen(true)}>
-              <Plus size={16} /> Quick log
-            </button>
-          </div>
-        </header>
-        <p className="month-context">
-          {data?.season?.name ?? "Current season"} · {data?.season?.theme ?? ""}{" "}
-          · {(data?.seasonProgress?.percentage ?? 0).toFixed(0)}% of the season
-          has elapsed
-        </p>
-        <section className="performance-hero">
-          <div className="hero-copy">
-            <p className="eyebrow2">{data?.season?.name ?? "Current season"}</p>
-            <h2>{data?.season?.theme ?? "Set a season"}</h2>
-            <div className="score-row">
-              <strong>{data?.score ?? 0}</strong>
-              <div>
-                <b>Trajectory</b>
-                <span>
-                  {data
-                    ? `${data.delta >= 0 ? "+" : ""}${data.delta} vs expected pace`
-                    : "Calculating from your evidence"}
-                </span>
-              </div>
-            </div>
-            <p className="delta">
-              Actual {data?.score ?? 0}% · Expected {data?.expected ?? 0}% ·
-              Projected finish {data?.projected ?? 0}%
-            </p>
-            <q>
-              {data?.goals?.length
-                ? "Your trajectory is calculated from goals and recorded evidence."
-                : "Create a goal, then log evidence to see your trajectory."}
-            </q>
-          </div>
-          <div className="orbit-panel">
-            <LifeOrbit areas={areas} />
-          </div>
-        </section>
-        <section className="momentum-strip">
-          {areas.map((area) => (
-            <Link
-              href={`/areas/${area.area.toLowerCase()}`}
-              className="momentum"
-              style={
-                {
-                  "--area": areaColors[area.area] ?? "#777",
-                } as React.CSSProperties
-              }
-              key={area.area}
-            >
-              <b>{area.area}</b>
-              <em>{area.momentum.replace("_", " ")}</em>
-              <small>
-                {area.score
-                  ? `${area.score}% actual · ${area.expected}% expected`
-                  : "No goal yet"}
-              </small>
-            </Link>
-          ))}
-        </section>
-        <section className="today-grid">
-          <div className="today-timeline">
-            <p className="eyebrow2">Today</p>
-            <h2 className="section-title">What moved today?</h2>
-            {entries.slice(0, 3).map((entry, index) => (
-              <Event
-                key={`${entry.type}-${entry.id}`}
-                time={index === 0 ? "Latest" : entry.entry_date.slice(5)}
-                title={entry.type}
-                detail={entry.detail}
-                color={areaColors[entry.area ?? "Career"] ?? "#777"}
-              />
-            ))}
-            {!entries.length && (
-              <p className="empty-state">
-                Nothing logged yet. Start with one honest piece of evidence.
-              </p>
-            )}
-            <button className="event-add" onClick={() => setOpen(true)}>
-              <Plus size={16} /> Log something
-            </button>
-          </div>
-          <div className="attention-section">
-            <p className="eyebrow2">Where your attention went</p>
-            <h2 className="section-title">Focused, not fragmented.</h2>
-            <Attention
-              minutes={data?.deepWorkMinutes ?? 0}
-              parts={attentionParts}
-            />
-          </div>
-        </section>
-        <section className="chart-section">
-          <div className="chart-heading">
-            <div>
-              <p className="eyebrow2">Trajectory vs time</p>
-              <h2 className="section-title">Actual life progress</h2>
-            </div>
-            <p>
-              Actual progress in orange. Expected season pace in the dotted
-              line.
-            </p>
-          </div>
-          <ProgressChart
-            score={data?.score ?? 0}
-            expected={data?.expected ?? 0}
-          />
-        </section>
-        <section className="horizon">
-          <p className="eyebrow2">On the horizon</p>
-          <h2 className="section-title">What you are approaching.</h2>
-          <div className="horizon-items">
-            {data?.goals?.slice(0, 4).map((goal) => (
-              <Link href={`/areas/${goal.area.toLowerCase()}`} key={goal.id}>
-                <b>{goal.area}</b>
-                <span>
-                  {goal.title} ·{" "}
-                  {Math.max(0, Math.round(goal.target - goal.current))}{" "}
-                  remaining
-                </span>
-              </Link>
-            ))}
-          </div>
-        </section>
-        <section className="journal-quote">
-          “
-          {latest?.content ??
-            "A journal becomes useful when it makes the next honest action easier to see."}
-          ”
-          <footer>
-            {latest ? `${latest.entry_date} · ${latest.entry_type} · ` : ""}
-            <Link href="/journal">Read reflection →</Link>
-          </footer>
-        </section>
-      </div>
-      {open && (
-        <div className="modal-backdrop">
-          <form className="modal" onSubmit={log}>
-            <p className="eyebrow2">Quick log · L</p>
-            <h2>What moved today?</h2>
-            <div className="log-kinds">
-              {logKinds.map((value) => (
-                <button
-                  type="button"
-                  className={kind === value ? "selected" : ""}
-                  onClick={() => setKind(value)}
-                  key={value}
-                >
-                  {value}
-                </button>
-              ))}
-            </div>
-            <label>
-              {kind}
-              <input
-                value={detail}
-                onChange={(event) => setDetail(event.target.value)}
-                autoFocus
-                placeholder={
-                  kind === "DSA"
-                    ? "Topic or category"
-                    : kind === "Scripture"
-                      ? "Book or passage"
-                      : `${kind} details`
-                }
-              />
-            </label>
-            {!["Journal", "Milestone"].includes(kind) && (
-              <label>
-                {kind === "DSA"
-                  ? "Problems"
-                  : kind === "Tutoring Revenue" || kind === "Finance"
-                    ? "Amount"
-                    : kind === "Mood"
-                      ? "Mood (1–10)"
-                      : "Minutes"}
-                <input
-                  type="number"
-                  min="1"
-                  value={quantity}
-                  onChange={(event) => setQuantity(event.target.value)}
-                />
-              </label>
-            )}
-            {["Deep Work", "Tutoring Revenue"].includes(kind) && (
-              <label>
-                Project
-                <input
-                  value={project}
-                  onChange={(event) => setProject(event.target.value)}
-                  placeholder={
-                    kind === "Tutoring Revenue" ? "Odysseus" : "Optional project"
-                  }
-                />
-              </label>
-            )}
-            <label>
-              Date
-              <input
-                type="date"
-                value={date}
-                onChange={(event) => setDate(event.target.value)}
-              />
-            </label>
-            {error && <p className="saved-note">{error}</p>}
-            <button className="save">Log it</button>
-            <button type="button" onClick={() => setOpen(false)}>
-              Cancel
-            </button>
-          </form>
-        </div>
-      )}
-    </main>
-  );
+  return <main className="app-shell"><div className="dashboard">
+    <header className="topline"><div><p>{formatDashboardDate()}</p><h1>Today.</h1></div><div className="top-actions"><Link href="/search"><Search size={16} /> Search</Link><button className="primary" onClick={() => quickLog?.openQuickLog()}><Plus size={16} /> Quick log <kbd>L</kbd></button></div></header>
+    {error ? <section className="dashboard-error" role="alert"><div><b>We couldn&apos;t load Today.</b><span>Your data has not been changed.</span></div><button onClick={() => void reload()}>Try again</button></section> : !data ? <DashboardSkeleton /> : <>
+      <p className="month-context">{data.season.name} · {data.season.theme} · {data.seasonProgress.percentage.toFixed(0)}% of this season has elapsed</p>
+      <section className="performance-hero"><div className="hero-copy"><p className="eyebrow2">Current season</p><h2>{data.season.theme || data.season.name}</h2><div className="score-row"><strong>{data.score}</strong><div><b>Trajectory</b><span>{data.delta >= 0 ? "Ahead" : "Slightly behind"} expected pace · {data.delta >= 0 ? "+" : ""}{data.delta}</span></div></div><p className="delta">Actual {data.score}% · Expected {data.expected}% · Projected finish {data.projected}%</p><q>Your trajectory reflects the goals and evidence you have recorded.</q></div><div className="orbit-panel"><LifeOrbit areas={areas} /></div></section>
+      <section className="today-grid"><div className="today-timeline"><p className="eyebrow2">What moved today</p><h2 className="section-title">The evidence so far.</h2>{entries.slice(0, 3).map((entry, index) => <Event key={`${entry.type}-${entry.id}`} time={index === 0 ? "Latest" : entry.entry_date.slice(5)} title={entry.type} detail={entry.detail} color={areaColors[entry.area ?? "Career"] ?? "#777"} />)}{!entries.length && <p className="empty-state">Nothing recorded today yet. Log one piece of evidence when something meaningful happens.</p>}<button className="event-add" onClick={() => quickLog?.openQuickLog()}><Plus size={16} /> Log evidence</button></div><div className="attention-section"><p className="eyebrow2">Momentum</p><h2 className="section-title">Where your attention went.</h2><Attention minutes={data.deepWorkMinutes} parts={attentionParts} /></div></section>
+      <section className="goal-focus"><div><p className="eyebrow2">Current goals</p><h2 className="section-title">What needs your attention.</h2></div><div className="goal-focus-list">{data.goals.length ? data.goals.slice(0, 4).map((goal) => <Link href={`/areas/${goal.area.toLowerCase()}`} key={goal.id}><span>{goal.area}</span><b>{goal.title}</b><small>{Math.round(goal.current)} / {Math.round(goal.target)} · {Math.max(0, Math.round(goal.target - goal.current))} remaining</small></Link>) : <p className="empty-state">Create a goal to see the pace you are building toward.</p>}</div></section>
+      <section className="chart-section"><div className="chart-heading"><div><p className="eyebrow2">Trajectory</p><h2 className="section-title">Actual progress, with context.</h2></div><p>Actual progress is compared with expected season pace.</p></div><ProgressChart score={data.score} expected={data.expected} /></section>
+      <section className="next-step"><div><p className="eyebrow2">Continue the record</p><h2 className="section-title">Make sense of the week when you&apos;re ready.</h2></div><Link href="/review">Open weekly review →</Link></section>
+      <section className="journal-quote">“{latest?.content ?? "A journal becomes useful when it makes the next honest action easier to see."}”<footer>{latest ? `${latest.entry_date} · ${latest.entry_type} · ` : ""}<Link href="/journal">Read reflection →</Link></footer></section>
+    </>}
+  </div></main>;
 }
-function Event({
-  time,
-  title,
-  detail,
-  color,
-}: {
-  time: string;
-  title: string;
-  detail: string;
-  color: string;
-}) {
-  return (
-    <div className="event">
-      <time>{time}</time>
-      <div style={{ borderLeft: `3px solid ${color}`, paddingLeft: 12 }}>
-        <b>{title}</b>
-        <small>{detail}</small>
-      </div>
-    </div>
-  );
-}
+
+function DashboardSkeleton() { return <><div className="dashboard-skeleton hero-skeleton" /><div className="dashboard-skeleton grid-skeleton" /><div className="dashboard-skeleton chart-skeleton" /></>; }
+function Event({ time, title, detail, color }: { time: string; title: string; detail: string; color: string }) { return <div className="event"><time>{time}</time><div style={{ borderLeft: `3px solid ${color}`, paddingLeft: 12 }}><b>{title}</b><small>{detail}</small></div></div>; }
