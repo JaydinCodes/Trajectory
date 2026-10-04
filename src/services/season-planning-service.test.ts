@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { activateDraftSeason, createDraftSeason } from "./season-planning-service";
+import { activateDraftSeason, completeInitialSeason, createDraftSeason } from "./season-planning-service";
 import type { SqliteDatabase } from "@/data/sqlite/types";
 import type { SeasonPlanInput } from "@/domain/season-planning/types";
 
@@ -50,5 +50,12 @@ describe("season planning service", () => {
     const blocked = store(true);
     expect(() => activateDraftSeason(blocked.database, 4)).toThrow(/overlaps/i);
     expect(blocked.calls.map((call) => call.sql)).toContain("rollback");
+  });
+  it("creates an initial active season, its goals, and completion state in one transaction", () => {
+    const { database, calls } = store();
+    expect(completeInitialSeason(database, input())).toEqual({ seasonId: 4, alreadyCompleted: false });
+    expect(calls.some((call) => call.sql.includes("activated_at") && call.args.includes("November"))).toBe(true);
+    expect(calls.some((call) => call.sql.includes("onboarding_completed"))).toBe(true);
+    expect(calls.map((call) => call.sql)).toContain("commit");
   });
 });

@@ -6,13 +6,14 @@ import { Plus, Search } from "lucide-react";
 import { Attention, areaColors, LifeOrbit, ProgressChart } from "@/components/dashboard-visuals";
 import { useQuickLog } from "@/components/app-chrome";
 import { formatDashboardDate } from "@/lib/date-time";
+import { lifeAreas } from "@/lib/areas";
 
 type Area = { area: string; score: number; expected: number; delta: number; momentum: "accelerating" | "steady" | "slowing" | "stalled" | "insufficient_data" };
 type Goal = { id: number; area: string; title: string; target: number; current: number };
 type Dashboard = { score: number; expected: number; delta: number; projected: number; season: { name: string; theme: string }; seasonProgress: { percentage: number }; deepWorkMinutes: number; areas: Area[]; goals: Goal[] };
 type Entry = { id: number; type: string; detail: string; amount: number | null; entry_date: string; area: string | null; project: string | null };
 type Journal = { id: number; content: string; entry_type: string; entry_date: string };
-const areaOrder = ["Faith", "Fitness", "Odysseus", "Ledgerly", "Career", "Coding", "Finance", "Personal"];
+const areaOrder = lifeAreas;
 
 export default function Home() {
   const quickLog = useQuickLog();

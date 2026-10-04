@@ -1,4 +1,6 @@
 import { expect, test } from "@playwright/test";
+import { ensureOnboarded } from "./onboarding-helper";
+test.beforeEach(async ({ page }) => { await ensureOnboarded(page); });
 
 test("mobile navigation keeps the core journey reachable", async ({ page }) => {
   await page.goto("/");
@@ -15,7 +17,7 @@ test("mobile navigation keeps the core journey reachable", async ({ page }) => {
   await page.getByRole("link", { name: "Review", exact: true }).click();
   await expect(page.getByRole("heading", { name: /A week in/i })).toBeVisible();
   await page.getByRole("link", { name: "History" }).click();
-  await expect(page.getByRole("heading", { name: /Where you/i })).toBeVisible();
+  await expect(page.getByRole("heading", { name: /Where you/i })).toBeVisible({ timeout: 15_000 });
   await page.getByRole("link", { name: "Patterns" }).click();
   await expect(page.getByRole("heading", { name: /What your record/i })).toBeVisible();
 });

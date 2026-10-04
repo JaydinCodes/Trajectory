@@ -14,7 +14,7 @@ import type { EvidenceSummary, WeeklyReflection } from "@/domain/review/types";
 import { calculateSeasonReview } from "@/services/season-review-service";
 import type { SeasonReflection, SeasonReview, WeeklyReviewSummary } from "@/domain/season-review/types";
 import { getSeasonWeekRanges } from "@/domain/season-review/season-period";
-import { activateDraftSeason, createDraftSeason, updateDraftSeason } from "@/services/season-planning-service";
+import { activateDraftSeason, completeInitialSeason, createDraftSeason, updateDraftSeason } from "@/services/season-planning-service";
 import { nextCalendarMonth } from "@/domain/season-planning/planning";
 import type { SeasonPlanInput, UnfinishedGoal } from "@/domain/season-planning/types";
 import type { AreaHistoryItem, GoalJourneyItem, HistoricalDate, HistoryMetric, SeasonComparison, SeasonTimelineItem } from "@/domain/history/types";
@@ -120,7 +120,10 @@ function db() {
   database.exec("update entries set metric_key='tutoring_revenue', project='Odysseus', area='Odysseus' where metric_key is null and type='Revenue'");
   database.exec("update financial_entries set metric_key='tutoring_revenue', project='Odysseus', area='Odysseus' where metric_key is null and kind='income' and category='Tutoring'");
   const count = database.prepare("select count(*) as n from entries").get() as {n:number};
-  if (!count.n && process.env.TRAJECTORY_SEED_DEMO === "true") seed(database);
+  if (!count.n && process.env.TRAJECTORY_SEED_DEMO === "true") {
+    seed(database);
+    database.prepare("insert into settings(key,value) values('onboarding_completed','true') on conflict(key) do update set value='true'").run();
+  }
   return database;
 }
 function seed(store: SqliteDatabase) {
@@ -167,21 +170,15 @@ export function removeRecord(kind:string,id:number){const tables:Record<string,s
 export function getActiveSeason(today = localDate()): Season {
  const store=db(); const existing=store.prepare("select * from seasons where status in ('active','completed') and start_date<=? and end_date>=? order by case status when 'active' then 0 else 1 end, start_date desc limit 1").get(today,today) as Season|undefined;
  if(existing){store.prepare("update goals set season_id=? where season_id is null and deadline between ? and ?").run(existing.id,existing.start_date,existing.end_date);return existing;}
- const seasonCount = store.prepare("select count(*) as count from seasons").get() as { count: number };
- if (seasonCount.count) throw new Error("There is no active season for this date. Plan and start a season first.");
- // The local demo seeds evidence before its first season exists. This one-time bootstrap
- // preserves that legacy data; all subsequently created seasons begin as drafts.
- const start=`${today.slice(0,7)}-01`; const end=`${today.slice(0,8)}${String(daysInMonth(today)).padStart(2,"0")}`;
- store.prepare("insert or ignore into seasons(name,theme,start_date,end_date,status,activated_at) values(?,?,?,?,?,current_timestamp)").run(monthName(today),"Consistency + Execution",start,end,"active");
- const season=store.prepare("select * from seasons where start_date=? and end_date=?").get(start,end) as Season;
- store.prepare("update goals set season_id=? where season_id is null and deadline between ? and ?").run(season.id,season.start_date,season.end_date);
- return season;
+ throw new Error("There is no active season for this date. Plan and start a season first.");
 }
 export function listSeasons(){ return db().prepare("select * from seasons order by start_date desc").all(); }
 export function createSeason(name:string,theme:string,startDate:string,endDate:string){ if(endDate<startDate) throw new Error("Season end must follow its start."); return db().prepare("insert into seasons(name,theme,start_date,end_date,status) values(?,?,?,?,?)").run(name,theme,startDate,endDate,"draft"); }
 export function createSeasonPlan(plan: SeasonPlanInput) { return createDraftSeason(db(), plan); }
 export function updateSeasonPlan(seasonId: number, plan: SeasonPlanInput) { return updateDraftSeason(db(), seasonId, plan); }
 export function activateSeasonPlan(seasonId: number) { return activateDraftSeason(db(), seasonId); }
+export function onboardingStatus() { const value = db().prepare("select value from settings where key='onboarding_completed'").get() as { value: string } | undefined; return { completed: value?.value === "true" }; }
+export function completeOnboarding(plan: SeasonPlanInput) { return completeInitialSeason(db(), plan); }
 
 type DirectionInput = { area: string; statement: string; why?: string | null; effectiveFrom: string };
 type HorizonInput = { name: string; horizonType: HorizonType; startDate?: string | null; endDate?: string | null; statement: string; outcomes: string[] };

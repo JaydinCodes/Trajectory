@@ -66,3 +66,25 @@ export function activateDraftSeason(database: SqliteDatabase, seasonId: number) 
     database.prepare("update goals set status='active' where season_id=? and status='draft'").run(seasonId);
   });
 }
+
+/** Creates the first active season and its contents as one transaction. Repeated submits return the original season. */
+export function completeInitialSeason(database: SqliteDatabase, plan: SeasonPlanInput) {
+  assertValid(plan, true);
+  return withTransaction(database, () => {
+    const completed = database.prepare("select value from settings where key='onboarding_completed'").get() as { value: string } | undefined;
+    if (completed?.value === "true") {
+      const saved = database.prepare("select value from settings where key='onboarding_season_id'").get() as { value: string } | undefined;
+      if (!saved) throw new Error("Onboarding has already been completed.");
+      return { seasonId: Number(saved.value), alreadyCompleted: true };
+    }
+    if (database.prepare("select id from seasons limit 1").get()) throw new Error("Existing seasons cannot be replaced by onboarding.");
+    database.prepare("insert into seasons(name,theme,intention,start_date,end_date,status,activated_at) values(?,?,?,?,?,'active',current_timestamp)").run(plan.name.trim(), plan.theme.trim(), plan.intention?.trim() || null, plan.startDate, plan.endDate);
+    const season = database.prepare("select last_insert_rowid() as id").get() as Row;
+    replaceDraftContents(database, season.id, plan);
+    database.prepare("update goals set status='active' where season_id=? and status='draft'").run(season.id);
+    database.prepare("insert into settings(key,value) values('onboarding_completed','true') on conflict(key) do update set value='true'").run();
+    database.prepare("insert into settings(key,value) values('onboarding_completed_at',current_timestamp) on conflict(key) do update set value=current_timestamp").run();
+    database.prepare("insert into settings(key,value) values('onboarding_season_id',?) on conflict(key) do update set value=excluded.value").run(String(season.id));
+    return { seasonId: season.id, alreadyCompleted: false };
+  });
+}

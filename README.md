@@ -13,7 +13,11 @@ Open `http://localhost:3000`.
 
 ## Local database
 
-Trajectory uses Node 24's built-in SQLite engine. The first journal entry, quick log, or weekly review creates and seeds `data/trajectory.db`; it is deliberately ignored from source control and all records remain on this machine. No account, cloud database, or environment variables are required for local use.
+Trajectory uses Node 24's built-in SQLite engine. A new `data/trajectory.db` contains only the schema and migrations; the first visit opens onboarding so you can create your own first season. All records remain on this machine. No account, cloud database, or environment variables are required for local use.
+
+### Optional demo fixtures
+
+Demo records are never created by default. For explicitly requested visual/demo work only, set `TRAJECTORY_SEED_DEMO=true` before the database is first opened. This marks that demo database as onboarded; it does not affect existing databases.
 
 ## Quality checks
 
@@ -31,7 +35,3 @@ npm run test
 - Associations require at least 6 weekly records, two groups of at least 3, variable attention, and a non-trivial standardized difference. Mood comparisons require at least 6 workout days and 6 non-workout days.
 - Seasonal monotonic trends and carry-forward observations require at least 3 completed seasons. Variability uses coefficient of variation; habit summaries use median and range.
 - The UI exposes every supporting period and deliberately uses association wording. It does not make causal claims, predictions, or coaching recommendations.
-
-## Next integration step
-
-The editorial dashboard uses intentional development seed data in `src/lib/data.ts`. Persisted entries and reflections are served through the local API routes in `src/app/api/`, making the transition to a hosted database a bounded future change.

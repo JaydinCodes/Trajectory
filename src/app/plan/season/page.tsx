@@ -7,12 +7,13 @@ import type { GoalImportance, PlannedGoalInput } from "@/domain/season-planning/
 import type { GoalType, MetricKey, TrackingMode } from "@/lib/trajectory/types";
 import { focusIndicator } from "@/domain/season-planning/planning";
 import type { PatternObservation } from "@/domain/patterns/types";
+import { derivedMetrics } from "@/lib/metric-registry";
 
 type Previous = { id: number; name: string; reflection?: { carryForward: string; leaveBehind: string; lesson: string }; unfinished: Array<{ id: number; title: string; area: string; target: number; current: number; trackingMode: TrackingMode; metricKey: MetricKey | null; goalType: GoalType }> };
 type Direction = { id: number; area: string; statement: string; horizons: Array<{ id: number; name: string; statement: string }> };
 type Context = { defaults: { name: string; startDate: string; endDate: string }; previous: Previous | null; areas: string[]; recommendedAreas: string[]; directions: Direction[]; patterns: PatternObservation[] };
 type GoalForm = PlannedGoalInput & { id: string };
-const metrics: Array<{ key: MetricKey; label: string }> = [{ key: "bible_days", label: "Bible reading days" }, { key: "gym_sessions", label: "Gym sessions" }, { key: "dsa_problems", label: "DSA problems" }, { key: "deep_work_minutes", label: "Deep-work minutes" }, { key: "tutoring_revenue", label: "Tutoring revenue" }, { key: "savings", label: "Savings" }];
+const metrics = derivedMetrics;
 const goalTypes: GoalType[] = ["count", "numeric", "currency", "duration", "milestone", "consistency", "binary"];
 const emptyGoal = (area = "") : GoalForm => ({ id: crypto.randomUUID(), title: "", area, target: 1, goalType: "count", trackingMode: "manual", metricKey: null, importance: "normal" });
 

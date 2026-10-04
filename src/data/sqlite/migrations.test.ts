@@ -28,10 +28,10 @@ afterEach(() => databases.splice(0).forEach((database) => database.close()));
 describe("SQLite migrations", () => {
  it("adopts an existing schema without resetting its records and is idempotent", () => {
   const database = legacyDatabase();
-  expect(runMigrations(database, ":memory:")).toBe(2);
+  expect(runMigrations(database, ":memory:")).toBe(3);
   expect(database.prepare("select entry_date,metric_key from entries").get()).toEqual({ entry_date: "2026-10-02", metric_key: "dsa_problems" });
-  expect(schemaVersion(database)).toBe(2);
-  expect(runMigrations(database, ":memory:")).toBe(2);
-  expect(database.prepare("select count(*) as count from schema_migrations").get()).toEqual({ count: 2 });
+  expect(schemaVersion(database)).toBe(3);
+  expect(runMigrations(database, ":memory:")).toBe(3);
+  expect(database.prepare("select count(*) as count from schema_migrations").get()).toEqual({ count: 3 });
  });
 });

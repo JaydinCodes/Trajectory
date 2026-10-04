@@ -20,6 +20,11 @@ const migrations: Migration[] = [
     create index if not exists journal_entry_date_idx on journal(entry_date);
     create index if not exists weekly_reviews_week_start_idx on weekly_reviews(week_start);
   `) },
+  { id: "003_onboarding_state", apply: (database) => {
+    const exists = (table: string) => Boolean(database.prepare("select 1 from sqlite_master where type='table' and name=?").get(table));
+    const hasExistingData = ["seasons", "goals", "entries", "journal", "milestones", "bible_entries", "workouts", "coding_entries", "financial_entries"].filter(exists).some((table) => Number((database.prepare(`select count(*) as count from ${table}`).get() as { count: number }).count) > 0);
+    if (hasExistingData && exists("settings")) database.prepare("insert into settings(key,value) values('onboarding_completed','true') on conflict(key) do nothing").run();
+  } },
 ];
 
 function backup(database: SqliteDatabase, databasePath: string) {
