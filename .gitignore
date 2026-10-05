@@ -1,8 +1,11 @@
 node_modules
 .next
 data/*.db
+data/*.sqlite
 data/*.db-shm
+data/*.sqlite-shm
 data/*.db-wal
+data/*.sqlite-wal
 data/*.log
 .tmp/
 data/backups/

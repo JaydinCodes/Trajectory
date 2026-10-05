@@ -2,7 +2,7 @@
 
 An editorial personal goal operating system with a responsive Today experience, separate review and reflection spaces, and testable trajectory calculations.
 
-## Run locally
+## Local use
 
 ```bash
 npm install
@@ -11,18 +11,25 @@ npm run dev
 
 Open `http://localhost:3000`.
 
-## Local database
+### Persistent local SQLite
 
-Trajectory uses Node 24's built-in SQLite engine. A new `data/trajectory.db` contains only the schema and migrations; the first visit opens onboarding so you can create your own first season. All records remain on this machine. No account, cloud database, or environment variables are required for local use.
+Trajectory uses Node's built-in SQLite engine (Node `>=22.13.0 <25`). A new `data/trajectory.db` contains only the schema and migrations; the first visit opens onboarding so you can create your own first season. All records remain on this machine. No account, cloud database, or environment variables are required for local use.
 
 ### Optional demo fixtures
 
 Demo records are never created by default. For explicitly requested visual/demo work only, set `TRAJECTORY_SEED_DEMO=true` before the database is first opened. This marks that demo database as onboarded; it does not affect existing databases.
 
+## Vercel deployment
+
+Vercel can build and preview the Next.js application, but it is not an authoritative Trajectory data host yet. The application deliberately refuses to use Vercel's ephemeral function filesystem for SQLite persistence. Preview deployments do not seed demo data or reuse a local database; `/api/health` reports persistence as unavailable.
+
+For fully usable, persistent Trajectory today, run locally. A future hosted-database decision is intentionally separate from this repository stage. See [deployment notes](docs/deployment.md).
+
 ## Quality checks
 
 ```bash
 npm run build
+npx tsc --noEmit
 npm run test
 ```
 

@@ -1,5 +1,6 @@
 import fs from "node:fs";
 import path from "node:path";
+import "server-only";
 import type { SqliteDatabase } from "./types";
 import { withTransaction } from "./transaction";
 

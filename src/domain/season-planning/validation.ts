@@ -1,4 +1,5 @@
 import type { SeasonPlanInput } from "./types";
+import { isLifeArea } from "@/lib/areas";
 
 const dateOnly = /^\d{4}-\d{2}-\d{2}$/;
 
@@ -11,8 +12,10 @@ export function validateSeasonPlan(plan: SeasonPlanInput, options: { requireGoal
   if (!dateOnly.test(plan.startDate) || !dateOnly.test(plan.endDate) || plan.endDate < plan.startDate) errors.push("Season dates must be valid and the end date must follow the start date.");
   if (options.requireGoals !== false && !plan.goals.length) errors.push("Create at least one meaningful goal before starting a season.");
   const metrics = new Set<string>();
+  for (const areaPlan of plan.areaPlans) if (!isLifeArea(areaPlan.area.trim())) errors.push(`\u201c${areaPlan.area || "Area"}\u201d is not a supported life area.`);
   for (const goal of plan.goals) {
     if (!goal.title.trim() || !goal.area.trim()) errors.push("Each goal needs a title and life area.");
+    else if (!isLifeArea(goal.area.trim())) errors.push(`\u201c${goal.area}\u201d is not a supported life area.`);
     if (!Number.isFinite(goal.target) || goal.target <= 0) errors.push(`“${goal.title || "Goal"}” needs a positive target.`);
     const deadline = goal.deadline ?? plan.endDate;
     if (!dateOnly.test(deadline) || deadline < plan.startDate || deadline > plan.endDate) errors.push(`“${goal.title || "Goal"}” has a deadline outside this season.`);

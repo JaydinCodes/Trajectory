@@ -26,6 +26,7 @@ import { calculatePatternIntelligence } from "@/services/pattern-intelligence-se
 import { integrityReport } from "@/data/sqlite/integrity";
 import { runMigrations, schemaVersion } from "@/data/sqlite/migrations";
 import { withTransaction } from "@/data/sqlite/transaction";
+import { assertDemoSeedingAllowed, assertLocalPersistenceAvailable } from "@/lib/runtime";
 const nodeSqlite: { DatabaseSync: new (filename:string) => SqliteDatabase } = require("node:sqlite");
 
 const dbPath = process.env.TRAJECTORY_DB_PATH ? path.resolve(process.env.TRAJECTORY_DB_PATH) : path.join(process.cwd(), "data", "trajectory.db");
@@ -38,6 +39,8 @@ function addColumn(store: SqliteDatabase, table: string, definition: string) {
 }
 function db() {
   if (database) return database;
+  assertLocalPersistenceAvailable();
+  assertDemoSeedingAllowed();
   fs.mkdirSync(dataDir, { recursive: true });
   database = new nodeSqlite.DatabaseSync(dbPath);
   database.exec("pragma foreign_keys = on");

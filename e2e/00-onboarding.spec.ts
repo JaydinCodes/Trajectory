@@ -23,6 +23,9 @@ test("a fresh installation starts a real first season without demo records", asy
   await page.getByRole("button", { name: "Continue" }).click();
   await page.getByRole("button", { name: /Add a goal/i }).click();
   const goal = page.locator(".onboarding-goals article");
+  await page.getByRole("button", { name: "Continue" }).click();
+  await expect(page.locator(".onboarding-error")).toContainText(/title and life area|positive target/i);
+  await expect(page.getByRole("heading", { name: "Choose goals you can live with." })).toBeVisible();
   await goal.getByRole("textbox", { name: "Goal" }).fill("Solve DSA problems");
   await goal.getByLabel("Target").fill("20");
   await goal.getByLabel("Tracking").selectOption("derived");
@@ -32,6 +35,7 @@ test("a fresh installation starts a real first season without demo records", asy
   await page.getByRole("button", { name: "Start my season" }).click();
   await expect(page).toHaveURL(/\/?started=1/);
   await expect(page.getByText(/Nothing recorded today yet/i)).toBeVisible();
+  await expect(page.getByText("No reflection recorded yet.")).toBeVisible();
   await page.getByRole("button", { name: /Quick log/i }).click();
   const dialog = page.getByRole("dialog", { name: "What moved today?" });
   await dialog.getByRole("button", { name: "DSA" }).click();

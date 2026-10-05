@@ -20,6 +20,10 @@ describe("season plan validation", () => {
     expect(validateSeasonPlan(value).errors.join(" ")).toMatch(/at least one/i);
     expect(validateSeasonPlan(value, { requireGoals: false }).errors).toEqual([]);
   });
+  it("rejects areas outside the authoritative life-area registry", () => {
+    const value = plan(); value.areaPlans[0].area = "Untrusted"; value.goals[0].area = "Untrusted";
+    expect(validateSeasonPlan(value).errors.join(" ")).toMatch(/supported life area/i);
+  });
   it("keeps carried manual baselines bounded by their new target", () => {
     const value = plan(); value.goals = [{ title: "MVP", area: "Ledgerly", target: 100, baselineValue: 82, carriedFromGoalId: 4, goalType: "numeric", trackingMode: "manual", importance: "critical" }];
     expect(validateSeasonPlan(value).errors).toEqual([]);
