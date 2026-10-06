@@ -11,9 +11,17 @@ npm run dev
 
 Open `http://localhost:3000`.
 
-### Persistent local SQLite
+### Persistent local SQLite rollback backend
 
-Trajectory uses Node's built-in SQLite engine (Node `>=22.13.0 <25`). A new `data/trajectory.db` contains only the schema and migrations; the first visit opens onboarding so you can create your own first season. All records remain on this machine. No account, cloud database, or environment variables are required for local use.
+SQLite remains available as an explicit local rollback/test backend (`TRAJECTORY_DATA_BACKEND=sqlite`). It is not suitable for Vercel production persistence.
+
+### Supabase production setup
+
+Set `TRAJECTORY_DATA_BACKEND=supabase`, `NEXT_PUBLIC_SUPABASE_URL`, and `NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY`. Then apply tracked migrations with `npx supabase db push` (or `npx supabase db reset` locally). Configure the Supabase Auth Site URL for the Vercel production URL and add local/preview callback URLs ending in `/auth/callback`. Do not switch production until every private API route has been moved from `local-db.ts` to its Supabase repository and the RLS suite has passed.
+
+Do not set a service-role key in Vercel unless running a controlled, server-only import. It must never use a `NEXT_PUBLIC_` name.
+
+To import an existing local record, make a filesystem backup of `data/trajectory.db`, set `SUPABASE_MIGRATION_USER_ID` explicitly, and run `npm run migrate:supabase -- --dry-run` first. The import is idempotent through `legacy_import_map`; it never runs as part of the app and never deletes SQLite.
 
 ### Optional demo fixtures
 
@@ -21,9 +29,7 @@ Demo records are never created by default. For explicitly requested visual/demo 
 
 ## Vercel deployment
 
-Vercel can build and preview the Next.js application, but it is not an authoritative Trajectory data host yet. The application deliberately refuses to use Vercel's ephemeral function filesystem for SQLite persistence. Preview deployments do not seed demo data or reuse a local database; `/api/health` reports persistence as unavailable.
-
-For fully usable, persistent Trajectory today, run locally. A future hosted-database decision is intentionally separate from this repository stage. See [deployment notes](docs/deployment.md).
+Vercel never treats the function filesystem as persistent storage. The Supabase auth, onboarding, and Quick Log path is implemented; the remaining SQLite-coupled domain endpoints must be ported before production cutover.
 
 ## Quality checks
 

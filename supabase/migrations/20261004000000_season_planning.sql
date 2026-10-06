@@ -39,7 +39,7 @@ create policy "own season planning lessons" on public.season_planning_lessons
 
 -- Existing data previously had an implicit lifecycle. Preserve the current period as active;
 -- reviewed historical seasons become completed, leaving other historical records as drafts.
-update public.seasons s set status = 'completed', completed_at = coalesce(completed_at, r.completed_at)
+update public.seasons s set status = 'completed', completed_at = coalesce(s.completed_at, r.completed_at)
 from public.season_reviews r where r.season_id = s.id and r.completed_at is not null;
 update public.seasons set status = 'active', activated_at = coalesce(activated_at, now())
 where status = 'draft' and starts_on <= current_date and ends_on >= current_date;
